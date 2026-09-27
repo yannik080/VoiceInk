@@ -62,3 +62,29 @@ Bildschirmaufnahme-Berechtigungen erneut verlangen.
 
 Private Änderungen dürfen privat bleiben. Bei Weitergabe der App gelten die
 Quellcode- und Lizenzpflichten der GPLv3. Der Fork ist kein offizieller VoiceInk-Release.
+
+## Wenn macOS trotz eingeschaltetem Schalter den Zugriff verweigert
+
+Beim Wechsel von der offiziellen App zum Eigenbuild kann macOS die alte
+Signierungsanforderung im Berechtigungseintrag behalten. Einfaches Aus-/Einschalten
+genügt dann nicht. Der konkrete Nachweis ist ein `tccd`-Log mit
+`SecStaticCodeCheckValidity` / `status: -67050`, das weiterhin das Hersteller-Team
+anstatt der eigenen Signatur verlangt. Erst App-Pfad und Signatur prüfen; nicht bei
+jedem Fehler pauschal Berechtigungen zurücksetzen.
+
+Wenn dieser Fall bestätigt ist: VoiceInk vollständig beenden und nur die betroffenen
+Berechtigungen dieser App zurücksetzen, beispielsweise:
+
+```sh
+tccutil reset Accessibility com.prakashjoshipax.VoiceInk
+tccutil reset Microphone com.prakashjoshipax.VoiceInk
+```
+
+Danach `/Applications/VoiceInk.app` öffnen und die Freigaben in macOS erneut durch
+den Benutzer erteilen lassen. VoiceInk anschließend einmal neu starten, damit die
+globalen Tastenkürzel mit der neuen Freigabe registriert werden. Den fehlenden
+Bedienungshilfen-Hinweis sowie Aufnahme und Einfügen wirklich prüfen.
+
+Diese Befehle löschen weder Einstellungen noch Modelle, Transkriptionen oder
+API-Schlüssel. Sie setzen keine Berechtigungen anderer Apps zurück. Ein Wechsel
+zurück zum Hersteller-Build kann eine erneute Freigabe erforderlich machen.
