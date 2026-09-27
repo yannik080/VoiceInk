@@ -24,6 +24,12 @@ Wenn mehrere Apple-Development-Zertifikate vorhanden sind, immer dieselbe Identi
 über `LOCAL_CODESIGN_IDENTITY` auswählen. Der erste Aufruf baut außerdem whisper.cpp;
 weitere Aufrufe verwenden dessen vorhandenes XCFramework.
 
+`LocalBuild.xcconfig` legt absichtlich keine Signierungsidentität fest: Xcodes
+`-xcconfig` hat Vorrang vor dem Kommandozeilenwert. Der Makefile-Wert muss wirksam
+bleiben, damit spätere Builds mit derselben Identität ihre Berechtigungen behalten.
+
+Falls Xcode die Metal Toolchain vermisst: `xcodebuild -downloadComponent MetalToolchain`.
+
 Zum Installieren zuerst VoiceInk regulär beenden, die bisherige App und ihre Daten
 sichern, dann die neue App nach `/Applications/VoiceInk.app` kopieren. Die Download-
 und Programme-Kopie nicht gleichzeitig starten. Die Release-Bundle-ID ist
@@ -46,6 +52,10 @@ erneut direkt in der App eingegeben werden müssen; vorhandene offizielle Schlü
 werden nicht gelöscht. Schlüssel niemals in Git, Build-Logs oder Dokumentation schreiben.
 
 Der lokale Build hat keine automatischen Updates und keinen iCloud-Wörterbuch-Sync.
+Dieser Fork deaktiviert dafür die Initialisierung und Update-Aktionen von Sparkle bei
+`LOCAL_BUILD`; eine gespeicherte Update-Präferenz der offiziellen App bleibt erhalten.
+Der Regressionstest läuft nach dem Auflösen der Pakete mit
+`bash scripts/check-local-updater.sh` in einer getrennten Preferences-Domain.
 Neue Upstream-Stände bewusst prüfen und in den Arbeitsbranch übernehmen. Nach einem
 Wechsel der Signierungsidentität kann macOS Mikrofon-, Bedienungshilfe- oder
 Bildschirmaufnahme-Berechtigungen erneut verlangen.
