@@ -278,9 +278,11 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
         engine.assistantSession.reset()
     }
 
-    func cancelRecording() async {
+    /// `keepsCanceledRecording: false` drops a recording that was never meant to happen
+    /// (a lone hybrid shortcut tap) instead of listing it as a canceled dictation.
+    func cancelRecording(keepsCanceledRecording: Bool = true) async {
         guard let engine = engine else { return }
-        await engine.cancelRecording()
+        await engine.cancelRecording(keepsCanceledRecording: keepsCanceledRecording)
         await dismissRecorderPanel()
     }
 

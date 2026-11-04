@@ -208,7 +208,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
                         sendAfterPaste: sendAfterPaste
                     )
                 } else {
-                    await finishActiveRecorderCancellation()
+                    await finishActiveRecorderCancellation(keepsCanceledRecording: true)
                 }
             } else {
                 cancelCurrentSession()
@@ -657,12 +657,14 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
     // MARK: - Cancellation
 
-    func cancelRecording() async {
+    /// `keepsCanceledRecording: false` drops the audio instead of listing it as a canceled
+    /// dictation, for a recording that was never meant to happen (a lone shortcut tap).
+    func cancelRecording(keepsCanceledRecording: Bool = true) async {
         let shouldFinishSessionImmediately: Bool
         switch recordingState {
         case .starting, .recording:
             requestRecordingCancellation()
-            await finishActiveRecorderCancellation()
+            await finishActiveRecorderCancellation(keepsCanceledRecording: keepsCanceledRecording)
             shouldFinishSessionImmediately = false
         case .transcribing, .enhancing:
             requestRecordingCancellation()
@@ -710,11 +712,15 @@ class VoiceInkEngine: NSObject, ObservableObject {
         cancelCurrentSession()
     }
 
-    private func finishActiveRecorderCancellation() async {
+    private func finishActiveRecorderCancellation(keepsCanceledRecording: Bool) async {
         activeRecordingStartID = nil
         clearActiveRecordingContext()
         await recorder.stopRecording()
-        await saveCanceledRecording()
+        if keepsCanceledRecording {
+            await saveCanceledRecording()
+        } else if let recordedFile {
+            try? FileManager.default.removeItem(at: recordedFile)
+        }
         recordedFile = nil
         partialTranscript = ""
         recordingState = .idle

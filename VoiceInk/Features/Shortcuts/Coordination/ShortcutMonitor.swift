@@ -4,7 +4,7 @@ import Foundation
 import os
 
 final class ShortcutMonitor {
-    fileprivate enum EventKind {
+    enum EventKind {
         case keyDown
         case keyUp
         case flagsChanged
@@ -166,8 +166,18 @@ final class ShortcutMonitor {
             kind: eventKind,
             inputCode: inputCode,
             modifierFlags: modifierFlags,
-            eventTime: ProcessInfo.processInfo.systemUptime
+            eventTime: Self.eventTime(of: event)
         )
+    }
+
+    /// When the key actually moved. Tap callbacks run on the main thread and can be late, which
+    /// would shrink the gap between the taps of a double tap. CGEvent timestamps share the system
+    /// uptime clock; anything implausible falls back to the time of handling.
+    private static func eventTime(of event: CGEvent) -> TimeInterval {
+        let now = ProcessInfo.processInfo.systemUptime
+        let timestamp = TimeInterval(event.timestamp) / 1_000_000_000
+        guard timestamp > 0, timestamp <= now, now - timestamp < 1 else { return now }
+        return timestamp
     }
 
     private func resetPressedShortcutsAfterTapInterruption() {
@@ -195,7 +205,8 @@ final class ShortcutMonitor {
         pressedKeyCodes.removeAll()
     }
 
-    private func handleEvent(
+    /// Internal so `scripts/check-shortcut-monitor.sh` can feed it events.
+    func handleEvent(
         kind: EventKind,
         inputCode: UInt16,
         modifierFlags: NSEvent.ModifierFlags,
@@ -377,26 +388,33 @@ final class ShortcutMonitor {
         }
 
         if state.isDown {
-            if state.shortcut.shouldReleaseModifierEvent(keyCode: keyCode, modifierFlags: modifierFlags) {
-                let shouldTrigger =
-                    state.requiresStandaloneRelease
-                    && !state.isInterrupted
-                let shouldDispatchUp = !state.requiresStandaloneRelease
-                let pressedAt = state.pressedAt
-                state.isDown = false
-                state.pressedAt = nil
-                state.isInterrupted = false
-                state.requiresStandaloneRelease = false
-                shortcuts[action] = state
-                if shouldTrigger, let pressedAt {
-                    dispatchShortcutDown(for: action, eventTime: pressedAt)
-                    dispatchShortcutUp(for: action, eventTime: eventTime)
-                } else if shouldDispatchUp {
-                    dispatchShortcutUp(for: action, eventTime: eventTime)
-                }
+            guard state.shortcut.shouldReleaseModifierEvent(keyCode: keyCode, modifierFlags: modifierFlags) else {
+                return
             }
 
-            return
+            let shouldTrigger =
+                state.requiresStandaloneRelease
+                && !state.isInterrupted
+            let shouldDispatchUp = !state.requiresStandaloneRelease
+            let pressedAt = state.pressedAt
+            state.isDown = false
+            state.pressedAt = nil
+            state.isInterrupted = false
+            state.requiresStandaloneRelease = false
+            shortcuts[action] = state
+            if shouldTrigger, let pressedAt {
+                dispatchShortcutDown(for: action, eventTime: pressedAt)
+                dispatchShortcutUp(for: action, eventTime: eventTime)
+            } else if shouldDispatchUp {
+                dispatchShortcutUp(for: action, eventTime: eventTime)
+            }
+
+            // While the main thread is busy (the recorder starting after the first tap of a double
+            // tap), WindowServer coalesces queued modifier changes: release and press arrive as one
+            // event that still reports the key as down. That event is the release and a new press.
+            guard state.shortcut.matchesModifierEvent(keyCode: keyCode, modifierFlags: modifierFlags) else {
+                return
+            }
         }
 
         if state.shortcut.matchesModifierEvent(keyCode: keyCode, modifierFlags: modifierFlags) {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 @MainActor
@@ -40,6 +41,7 @@ class RecordingShortcutManager: ObservableObject {
     private let modeShortcutManager: ModeShortcutManager
     private let shortcutMonitor = ShortcutMonitor()
     private var shortcutChangeObserver: NSObjectProtocol?
+    private var recordingStateObserver: AnyCancellable?
     private let shortcutModeHandler: RecordingShortcutModeHandler
     private let primaryRecordingShortcutModeSource: RecordingShortcutModeSource
 
@@ -110,6 +112,9 @@ class RecordingShortcutManager: ObservableObject {
             },
             cancelRecording: {
                 await recorderUIManager.cancelRecording()
+            },
+            discardRecording: {
+                await recorderUIManager.cancelRecording(keepsCanceledRecording: false)
             }
         )
 
@@ -139,10 +144,30 @@ class RecordingShortcutManager: ObservableObject {
             }
         }
 
+        // `@Published` emits before the new value is stored, so the replay hops to the next main
+        // actor turn and reads the settled state there.
+        recordingStateObserver = engine.$recordingState
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    await self?.resumeDeferredShortcutPress()
+                }
+            }
+
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 100_000_000)
             self.refreshShortcutMonitoring()
         }
+    }
+
+    private func resumeDeferredShortcutPress() async {
+        // A cancelled dictation goes idle while its pipeline is still winding down; starting a new
+        // recording then would race the old session's cleanup.
+        guard !engine.shouldCancelRecording else {
+            shortcutModeHandler.discardDeferredPress()
+            return
+        }
+        await shortcutModeHandler.resumeDeferredPress(now: ProcessInfo.processInfo.systemUptime)
     }
 
     private func refreshShortcutMonitoring() {
@@ -295,217 +320,5 @@ private final class RecordingShortcutModeSource {
 
     init(primaryMode: RecordingShortcutManager.Mode) {
         self.primaryMode = primaryMode
-    }
-}
-
-@MainActor
-final class RecordingShortcutModeHandler {
-    private let canHandleShortcutAction: @MainActor () -> Bool
-    private let isRecorderVisible: @MainActor () -> Bool
-    private let recordingState: @MainActor () -> RecordingState
-    private let toggleRecorderPanel: @MainActor (UUID?) async -> Void
-    private let cancelRecording: @MainActor () async -> Void
-
-    private var shortcutPressStartTime: TimeInterval?
-    private var isHandsFreeRecording = false
-    private var isShortcutPressed = false
-    private var activeRecordingShortcutAction: ShortcutAction?
-    private var interruptedRecordingActions = Set<ShortcutAction>()
-    private var activeShortcutCanCancelAccidentalStart = false
-    private var activeShortcutIsDoubleTap = false
-    private var lastShortcutPressTime: Date?
-    private var pendingDoubleTapReleaseTimes: [ShortcutAction: TimeInterval] = [:]
-
-    private let shortcutPressCooldown: TimeInterval = 0.5
-    private let hybridPressThreshold: TimeInterval = 0.5
-    private let doubleTapThreshold: TimeInterval = 0.7
-
-    init(
-        canHandleShortcutAction: @escaping @MainActor () -> Bool,
-        isRecorderVisible: @escaping @MainActor () -> Bool,
-        recordingState: @escaping @MainActor () -> RecordingState,
-        toggleRecorderPanel: @escaping @MainActor (UUID?) async -> Void,
-        cancelRecording: @escaping @MainActor () async -> Void
-    ) {
-        self.canHandleShortcutAction = canHandleShortcutAction
-        self.isRecorderVisible = isRecorderVisible
-        self.recordingState = recordingState
-        self.toggleRecorderPanel = toggleRecorderPanel
-        self.cancelRecording = cancelRecording
-    }
-
-    func reset() {
-        isShortcutPressed = false
-        shortcutPressStartTime = nil
-        isHandsFreeRecording = false
-        activeRecordingShortcutAction = nil
-        interruptedRecordingActions.removeAll()
-        activeShortcutCanCancelAccidentalStart = false
-        activeShortcutIsDoubleTap = false
-        clearPendingDoubleTaps()
-    }
-
-    func clearPendingDoubleTaps() {
-        pendingDoubleTapReleaseTimes.removeAll()
-    }
-
-    func clearPendingDoubleTap(for action: ShortcutAction) {
-        pendingDoubleTapReleaseTimes.removeValue(forKey: action)
-    }
-
-    func clearPendingModeDoubleTaps() {
-        pendingDoubleTapReleaseTimes = pendingDoubleTapReleaseTimes.filter { action, _ in
-            if case .mode = action { return false }
-            return true
-        }
-    }
-
-    func resetShortcutState(for action: ShortcutAction) {
-        pendingDoubleTapReleaseTimes.removeValue(forKey: action)
-        guard activeRecordingShortcutAction == action else { return }
-        isShortcutPressed = false
-        shortcutPressStartTime = nil
-        activeRecordingShortcutAction = nil
-        activeShortcutCanCancelAccidentalStart = false
-        activeShortcutIsDoubleTap = false
-    }
-
-    func handleShortcutDown(
-        action: ShortcutAction,
-        eventTime: TimeInterval,
-        mode: RecordingShortcutManager.Mode,
-        modeId: UUID? = nil
-    ) async {
-        if interruptedRecordingActions.remove(action) != nil {
-            return
-        }
-
-        if mode == .doubleTap && (!canHandleShortcutAction() || recordingState() == .starting) {
-            clearPendingDoubleTap(for: action)
-            return
-        }
-
-        if mode != .doubleTap, let lastTrigger = lastShortcutPressTime,
-            Date().timeIntervalSince(lastTrigger) < shortcutPressCooldown
-        {
-            return
-        }
-
-        guard !isShortcutPressed else {
-            return
-        }
-        isShortcutPressed = true
-        activeRecordingShortcutAction = action
-        activeShortcutIsDoubleTap = mode == .doubleTap
-        activeShortcutCanCancelAccidentalStart = mode != .doubleTap && canCurrentShortcutPressCancelAccidentalStart
-        if mode != .doubleTap {
-            lastShortcutPressTime = Date()
-        }
-        shortcutPressStartTime = eventTime
-
-        switch mode {
-        case .toggle, .hybrid:
-            if isHandsFreeRecording {
-                isHandsFreeRecording = false
-                guard canHandleShortcutAction() else { return }
-                await toggleRecorderPanel(modeId)
-                return
-            }
-
-            if !isRecorderVisible() {
-                guard canHandleShortcutAction() else { return }
-                await toggleRecorderPanel(modeId)
-            }
-
-        case .pushToTalk:
-            if !isRecorderVisible() {
-                guard canHandleShortcutAction() else { return }
-                await toggleRecorderPanel(modeId)
-            }
-
-        case .doubleTap:
-            break
-        }
-    }
-
-    func handleShortcutUp(
-        action: ShortcutAction,
-        eventTime: TimeInterval,
-        mode: RecordingShortcutManager.Mode,
-        modeId: UUID? = nil
-    ) async {
-        guard isShortcutPressed, activeRecordingShortcutAction == action else { return }
-        isShortcutPressed = false
-        activeRecordingShortcutAction = nil
-        activeShortcutCanCancelAccidentalStart = false
-        activeShortcutIsDoubleTap = false
-
-        switch mode {
-        case .toggle:
-            isHandsFreeRecording = true
-
-        case .pushToTalk:
-            if isRecorderVisible() {
-                guard canHandleShortcutAction() else { return }
-                await toggleRecorderPanel(modeId)
-            }
-
-        case .hybrid:
-            let pressDuration = shortcutPressStartTime.map { eventTime - $0 } ?? 0
-            if pressDuration >= hybridPressThreshold && recordingState() == .recording {
-                guard canHandleShortcutAction() else { return }
-                await toggleRecorderPanel(modeId)
-            } else {
-                isHandsFreeRecording = true
-            }
-
-        case .doubleTap:
-            guard canHandleShortcutAction(), recordingState() != .starting else {
-                clearPendingDoubleTap(for: action)
-                break
-            }
-            let pressDuration = shortcutPressStartTime.map { eventTime - $0 } ?? 0
-            if pressDuration < 0 || pressDuration > doubleTapThreshold {
-                pendingDoubleTapReleaseTimes.removeValue(forKey: action)
-            } else if let firstRelease = pendingDoubleTapReleaseTimes.removeValue(forKey: action),
-                eventTime - firstRelease >= 0,
-                eventTime - firstRelease <= doubleTapThreshold
-            {
-                await toggleRecorderPanel(modeId)
-                isHandsFreeRecording = isRecorderVisible()
-            } else {
-                pendingDoubleTapReleaseTimes[action] = eventTime
-            }
-        }
-
-        shortcutPressStartTime = nil
-    }
-
-    func handleInterruption(action: ShortcutAction) async {
-        guard isShortcutPressed, activeRecordingShortcutAction == action else {
-            if canCurrentShortcutPressCancelAccidentalStart {
-                interruptedRecordingActions.insert(action)
-            }
-            return
-        }
-
-        if activeShortcutIsDoubleTap {
-            isShortcutPressed = false
-            shortcutPressStartTime = nil
-            activeRecordingShortcutAction = nil
-            activeShortcutCanCancelAccidentalStart = false
-            activeShortcutIsDoubleTap = false
-            pendingDoubleTapReleaseTimes.removeValue(forKey: action)
-            return
-        }
-
-        guard activeShortcutCanCancelAccidentalStart else { return }
-
-        reset()
-        await cancelRecording()
-    }
-
-    private var canCurrentShortcutPressCancelAccidentalStart: Bool {
-        !isRecorderVisible() && recordingState() == .idle
     }
 }
