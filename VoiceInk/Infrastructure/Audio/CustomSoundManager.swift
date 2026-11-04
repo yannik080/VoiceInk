@@ -6,6 +6,19 @@ class CustomSoundManager: ObservableObject {
     static let shared = CustomSoundManager()
 
     enum BuiltInSound: String, CaseIterable, Identifiable {
+        // Paired sounds: one file for start (`<name>-start.wav`) and one for stop (`<name>-stop.wav`).
+        case buttonDeepSolid = "button-deep-solid"
+        case buttonDeep = "button-deep"
+        case button
+        case tap
+        case pebble
+        case bubble
+        case glass
+        case crystal
+        case wood
+        case felt
+        case drop
+        // Original single-file sounds, used for start and stop alike.
         case sound1
         case sound2
         case sound3
@@ -16,22 +29,53 @@ class CustomSoundManager: ObservableObject {
 
         var id: String { rawValue }
 
+        static let pairedSounds: [BuiltInSound] = [
+            .buttonDeepSolid, .buttonDeep, .button, .tap, .pebble, .bubble,
+            .glass, .crystal, .wood, .felt, .drop
+        ]
+
+        var isPaired: Bool { Self.pairedSounds.contains(self) }
+
         var displayName: String {
-            String(localized: "Sound \(number)")
+            switch self {
+            case .buttonDeepSolid: return String(localized: "Deep Solid Button")
+            case .buttonDeep: return String(localized: "Deep Button")
+            case .button: return String(localized: "Button")
+            case .tap: return String(localized: "Tap")
+            case .pebble: return String(localized: "Pebble")
+            case .bubble: return String(localized: "Bubble")
+            case .glass: return String(localized: "Glass")
+            case .crystal: return String(localized: "Crystal")
+            case .wood: return String(localized: "Wood")
+            case .felt: return String(localized: "Felt")
+            case .drop: return String(localized: "Drop")
+            default: return String(localized: "Sound \(number)")
+            }
         }
 
         var fileExtension: String {
             switch self {
-            case .sound1, .sound2, .sound3, .sound4, .sound7:
-                return "wav"
             case .sound5, .sound6:
                 return "mp3"
+            default:
+                return "wav"
             }
         }
 
+        /// Resource name for the given use. Paired sounds have a separate file per type.
+        func resourceName(for type: SoundType) -> String {
+            isPaired ? "\(rawValue)-\(type.rawValue)" : rawValue
+        }
+
+        func bundleURL(for type: SoundType) -> URL? {
+            let name = resourceName(for: type)
+            return Bundle.main.url(forResource: name, withExtension: fileExtension)
+                ?? Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Sounds")
+        }
+
+        /// Single-file sounds only (e.g. the Esc sound).
         var bundleURL: URL? {
-            Bundle.main.url(forResource: rawValue, withExtension: fileExtension)
-                ?? Bundle.main.url(forResource: rawValue, withExtension: fileExtension, subdirectory: "Sounds")
+            bundleURL(for: .start)
         }
 
         private var number: Int {
@@ -49,10 +93,8 @@ class CustomSoundManager: ObservableObject {
         var standardName: String { "Custom\(rawValue.capitalized)Sound" }
         var defaultBuiltInSound: BuiltInSound {
             switch self {
-            case .start:
-                return .sound5
-            case .stop:
-                return .sound6
+            case .start, .stop:
+                return .buttonDeepSolid
             }
         }
     }
@@ -214,9 +256,9 @@ class CustomSoundManager: ObservableObject {
         case .none:
             return nil
         case .builtIn(let sound):
-            return sound.bundleURL
+            return sound.bundleURL(for: type)
         case .custom:
-            return storedBuiltInSound(for: type).bundleURL
+            return storedBuiltInSound(for: type).bundleURL(for: type)
         }
     }
 
