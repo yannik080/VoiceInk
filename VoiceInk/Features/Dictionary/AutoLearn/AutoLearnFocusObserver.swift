@@ -4,21 +4,31 @@ import Foundation
 private final class AutoLearnFocusCallbackBridge: @unchecked Sendable {
     let token: AutoLearnPasteToken
     let handler: @Sendable (AutoLearnPasteToken) -> Void
+    let valueHandler: @Sendable (AutoLearnPasteToken) -> Void
 
-    init(token: AutoLearnPasteToken, handler: @escaping @Sendable (AutoLearnPasteToken) -> Void) {
+    init(
+        token: AutoLearnPasteToken,
+        handler: @escaping @Sendable (AutoLearnPasteToken) -> Void,
+        valueHandler: @escaping @Sendable (AutoLearnPasteToken) -> Void
+    ) {
         self.token = token
         self.handler = handler
+        self.valueHandler = valueHandler
     }
 
-    func notify() {
-        handler(token)
+    func notify(_ notification: CFString) {
+        if CFEqual(notification, kAXValueChangedNotification as CFString) {
+            valueHandler(token)
+        } else {
+            handler(token)
+        }
     }
 }
 
-private let autoLearnFocusCallback: AXObserverCallback = { _, _, _, refcon in
+private let autoLearnFocusCallback: AXObserverCallback = { _, _, notification, refcon in
     guard let refcon else { return }
     let bridge = Unmanaged<AutoLearnFocusCallbackBridge>.fromOpaque(refcon).takeUnretainedValue()
-    bridge.notify()
+    bridge.notify(notification)
 }
 
 final class AutoLearnFocusObserver: @unchecked Sendable {
@@ -34,7 +44,8 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
     func start(
         processID: pid_t,
         token: AutoLearnPasteToken,
-        handler: @escaping @Sendable (AutoLearnPasteToken) -> Void
+        handler: @escaping @Sendable (AutoLearnPasteToken) -> Void,
+        valueHandler: @escaping @Sendable (AutoLearnPasteToken) -> Void
     ) {
         stop()
 
@@ -50,7 +61,8 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
                 processID: processID,
                 token: token,
                 generation: generation,
-                handler: handler
+                handler: handler,
+                valueHandler: valueHandler
             )
         }
         thread.name = "VoiceInk Auto Learn Focus Observer"
@@ -81,7 +93,8 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
         processID: pid_t,
         token: AutoLearnPasteToken,
         generation: UUID,
-        handler: @escaping @Sendable (AutoLearnPasteToken) -> Void
+        handler: @escaping @Sendable (AutoLearnPasteToken) -> Void,
+        valueHandler: @escaping @Sendable (AutoLearnPasteToken) -> Void
     ) {
         autoreleasepool {
             let appElement = AXUIElementCreateApplication(processID)
@@ -95,18 +108,22 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
                 return
             }
 
-            let bridge = AutoLearnFocusCallbackBridge(token: token, handler: handler)
+            let bridge = AutoLearnFocusCallbackBridge(
+                token: token,
+                handler: handler,
+                valueHandler: valueHandler
+            )
             let refcon = Unmanaged.passRetained(bridge).toOpaque()
             let requestedNotifications = [
                 kAXFocusedUIElementChangedNotification as String,
                 kAXFocusedWindowChangedNotification as String,
                 kAXApplicationDeactivatedNotification as String,
             ]
-            var registeredNotifications: [String] = []
+            var registeredNotifications: [(element: AXUIElement, name: String)] = []
 
             for notification in requestedNotifications {
                 if AXObserverAddNotification(observer, appElement, notification as CFString, refcon) == .success {
-                    registeredNotifications.append(notification)
+                    registeredNotifications.append((appElement, notification))
                 }
             }
 
@@ -114,6 +131,30 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
                 Unmanaged<AutoLearnFocusCallbackBridge>.fromOpaque(refcon).release()
                 clearState(for: generation)
                 return
+            }
+
+            // Value changes only on the dictated field; registering on the
+            // application would report every changing control in a browser.
+            var focusedValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(
+                appElement,
+                kAXFocusedUIElementAttribute as CFString,
+                &focusedValue
+            ) == .success,
+                let focusedValue,
+                CFGetTypeID(focusedValue) == AXUIElementGetTypeID()
+            {
+                let focusedElement = focusedValue as! AXUIElement
+                if AXObserverAddNotification(
+                    observer,
+                    focusedElement,
+                    kAXValueChangedNotification as CFString,
+                    refcon
+                ) == .success {
+                    registeredNotifications.append(
+                        (focusedElement, kAXValueChangedNotification as String)
+                    )
+                }
             }
 
             let runLoop = CFRunLoopGetCurrent()
@@ -127,8 +168,8 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
             }
             guard shouldRun else {
                 CFRunLoopRemoveSource(runLoop, source, .defaultMode)
-                for notification in registeredNotifications {
-                    AXObserverRemoveNotification(observer, appElement, notification as CFString)
+                for registration in registeredNotifications {
+                    AXObserverRemoveNotification(observer, registration.element, registration.name as CFString)
                 }
                 Unmanaged<AutoLearnFocusCallbackBridge>.fromOpaque(refcon).release()
                 clearState(for: generation)
@@ -144,8 +185,8 @@ final class AutoLearnFocusObserver: @unchecked Sendable {
             }
 
             CFRunLoopRemoveSource(runLoop, source, .defaultMode)
-            for notification in registeredNotifications {
-                AXObserverRemoveNotification(observer, appElement, notification as CFString)
+            for registration in registeredNotifications {
+                AXObserverRemoveNotification(observer, registration.element, registration.name as CFString)
             }
             Unmanaged<AutoLearnFocusCallbackBridge>.fromOpaque(refcon).release()
             clearState(for: generation)

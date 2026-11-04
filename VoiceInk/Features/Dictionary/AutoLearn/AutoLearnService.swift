@@ -20,6 +20,9 @@ actor AutoLearnService {
     private var activeProcessID: pid_t?
     private var deadlineTask: Task<Void, Never>?
     private var focusFinalizationTask: Task<Void, Never>?
+    private var fieldSamplingTask: Task<Void, Never>?
+    private var isSamplingField = false
+    private var fieldSampleRequestedAgain = false
     private var reviewTask: Task<Void, Never>?
     private var reviewGeneration: UInt64 = 0
     private var claimedCandidateIDs = Set<UUID>()
@@ -71,6 +74,7 @@ actor AutoLearnService {
         }
         lifecycleGeneration &+= 1
         await discardActiveSession()
+        await accessibilityRuntime.restoreAllWebAccessibility()
     }
 
     func reviewScheduleDidChange() async {
@@ -204,13 +208,17 @@ actor AutoLearnService {
         try await pendingQueue.outstandingCount()
     }
 
-    func recordingDidStart() async {
+    func recordingDidStart(targetProcessID: pid_t?) async {
         guard AutoLearnSettings.isEnabled else { return }
+        // Earlier dictations stay observed: the next paste into the same field
+        // carries them over. Sampling now keeps edits made before this
+        // recording apart from the paste.
         if let token = activeToken {
-            await completeSession(token: token, persist: true)
+            await fieldValueMayHaveChanged(token: token)
         }
-        lifecycleGeneration &+= 1
-        await discardActiveSession()
+        if let targetProcessID {
+            await accessibilityRuntime.prepareTarget(processID: targetProcessID)
+        }
     }
 
     func pasteDidFinish(text: String, processID: pid_t?, commandPosted: Bool) async -> UInt64? {
@@ -222,8 +230,8 @@ actor AutoLearnService {
             return nil
         }
 
-        // Finalize the previous session after Command-V so Accessibility and
-        // SwiftData work do not delay the paste.
+        // Hand the previous session to the capture after Command-V so
+        // Accessibility and SwiftData work do not delay the paste.
         let previousToken = activeToken
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -231,6 +239,7 @@ actor AutoLearnService {
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        stopFieldSampling()
         focusObserver.stop()
         activeToken = nil
         activeGeneration = nil
@@ -239,15 +248,11 @@ actor AutoLearnService {
         guard lifecycleGeneration == generation, AutoLearnSettings.isEnabled else { return nil }
 
         deadlineTask = Task { [weak self] in
-            if let previousToken {
-                // `finishSnapshot` drops the session, so the pending capture is
-                // cancelled before a new one can be started.
-                await self?.persistFinishedSession(token: previousToken)
-            }
             await self?.beginObservation(
                 text: text,
                 processID: processID,
-                generation: generation
+                generation: generation,
+                previousToken: previousToken
             )
         }
         return generation
@@ -256,8 +261,12 @@ actor AutoLearnService {
     func cancelForAutoSend(generation: UInt64) async {
         guard AutoLearnSettings.isEnabled else { return }
         guard lifecycleGeneration == generation else { return }
+        // The new dictation is sent at once and cannot be corrected. Earlier
+        // dictations into the field are finished by the stopped capture.
         lifecycleGeneration &+= 1
-        await discardActiveSession()
+        if let token = activeToken {
+            await completeSession(token: token, persist: true)
+        }
     }
 
     func shutdown() async {
@@ -277,58 +286,135 @@ actor AutoLearnService {
     private func beginObservation(
         text: String,
         processID: pid_t,
-        generation: UInt64
+        generation: UInt64,
+        previousToken: AutoLearnPasteToken?
     ) async {
-        guard await sleep(nanoseconds: AutoLearnLimits.verificationDelayNanoseconds),
-            !Task.isCancelled,
-            lifecycleGeneration == generation,
-            AutoLearnSettings.isEnabled
-        else { return }
-
-        guard let token = await accessibilityRuntime.capturePastedText(
-                text: text,
-                processID: processID
-            )
-        else { return }
+        let capturedToken = await capture(
+            text: text,
+            processID: processID,
+            generation: generation
+        )
+        // A capture into the same field carried the earlier dictations over;
+        // otherwise they end here.
+        await persistFinishedSessions(token: previousToken)
+        guard let token = capturedToken else { return }
 
         guard lifecycleGeneration == generation,
             !Task.isCancelled,
             AutoLearnSettings.isEnabled
         else {
-            await accessibilityRuntime.discard(token: token)
+            await persistFinishedSessions(token: token)
             return
         }
 
         activeToken = token
         activeGeneration = generation
         activeProcessID = processID
-        focusObserver.start(processID: processID, token: token) { token in
-            Task {
-                await AutoLearnService.shared.focusMayHaveChanged(token: token)
+        focusObserver.start(
+            processID: processID,
+            token: token,
+            handler: { token in
+                Task {
+                    await AutoLearnService.shared.focusMayHaveChanged(token: token)
+                }
+            },
+            valueHandler: { token in
+                Task {
+                    await AutoLearnService.shared.fieldValueMayHaveChanged(token: token)
+                }
             }
-        }
+        )
+        startFieldSampling(token: token)
         scheduleDeadline(
             token: token,
             after: AutoLearnLimits.observationDurationNanoseconds
         )
     }
 
+    private func capture(
+        text: String,
+        processID: pid_t,
+        generation: UInt64
+    ) async -> AutoLearnPasteToken? {
+        let attemptDelays = [AutoLearnLimits.verificationDelayNanoseconds]
+            + AutoLearnLimits.captureRetryDelaysNanoseconds
+
+        for (index, delay) in attemptDelays.enumerated() {
+            guard await sleep(nanoseconds: delay),
+                !Task.isCancelled,
+                lifecycleGeneration == generation,
+                AutoLearnSettings.isEnabled
+            else { return nil }
+
+            let outcome = await accessibilityRuntime.capturePastedText(
+                text: text,
+                processID: processID,
+                attempt: index + 1,
+                isFinalAttempt: index == attemptDelays.count - 1
+            )
+            switch outcome {
+            case .captured(let token):
+                return token
+            case .retryable:
+                continue
+            case .rejected:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    func fieldValueMayHaveChanged(token: AutoLearnPasteToken) async {
+        guard activeToken == token else { return }
+        // Coalesce bursts of keystrokes: one read in flight, one trailing read.
+        guard !isSamplingField else {
+            fieldSampleRequestedAgain = true
+            return
+        }
+        isSamplingField = true
+        var stillObserving = true
+        repeat {
+            fieldSampleRequestedAgain = false
+            stillObserving = await accessibilityRuntime.sampleField(token: token)
+        } while stillObserving && fieldSampleRequestedAgain && activeToken == token
+        isSamplingField = false
+        if !stillObserving {
+            // Sent or rewritten: learn now instead of at the deadline.
+            await completeSession(token: token, persist: true)
+        }
+    }
+
+    private func startFieldSampling(token: AutoLearnPasteToken) {
+        fieldSamplingTask?.cancel()
+        fieldSamplingTask = Task { [weak self] in
+            await self?.fieldValueMayHaveChanged(token: token)
+            while let self,
+                await self.sleep(nanoseconds: AutoLearnLimits.fieldSampleIntervalNanoseconds),
+                !Task.isCancelled
+            {
+                await self.fieldValueMayHaveChanged(token: token)
+            }
+        }
+    }
+
+    private func stopFieldSampling() {
+        fieldSamplingTask?.cancel()
+        fieldSamplingTask = nil
+        fieldSampleRequestedAgain = false
+    }
+
     private func discardActiveSession() async {
         snapshotCancellationGeneration &+= 1
-        let token = activeToken
         deadlineTask?.cancel()
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        stopFieldSampling()
         focusObserver.stop()
         activeToken = nil
         activeGeneration = nil
         activeProcessID = nil
-        if let token {
-            await accessibilityRuntime.discard(token: token)
-        } else {
-            await accessibilityRuntime.discard()
-        }
+        await accessibilityRuntime.discard()
     }
 
     private func completeSession(token: AutoLearnPasteToken, persist: Bool) async {
@@ -340,20 +426,23 @@ actor AutoLearnService {
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        stopFieldSampling()
         focusObserver.stop()
 
         if persist {
-            await persistFinishedSession(token: token)
+            await persistFinishedSessions(token: token)
         } else {
-            await accessibilityRuntime.discard(token: token)
+            await accessibilityRuntime.discard()
         }
     }
 
-    private func persistFinishedSession(token: AutoLearnPasteToken) async {
+    private func persistFinishedSessions(token: AutoLearnPasteToken?) async {
         let cancellationGeneration = snapshotCancellationGeneration
-        let snapshot = await accessibilityRuntime.finishSnapshot(token: token)
+        let snapshots = await accessibilityRuntime.finishSnapshots(token: token)
         guard snapshotCancellationGeneration == cancellationGeneration else { return }
-        await persistSnapshot(snapshot)
+        for snapshot in snapshots {
+            await persistSnapshot(snapshot)
+        }
     }
 
     private func finalizeIfFocusLeft(token: AutoLearnPasteToken) async {
@@ -390,15 +479,25 @@ actor AutoLearnService {
             let snapshot
         else { return }
 
-        guard let revision = FinalSnapshotDiffEngine.revision(from: snapshot) else { return }
+        guard let revision = FinalSnapshotDiffEngine.revision(from: snapshot) else {
+            logger.notice(
+                "Auto Learn snapshot produced no revision source=\(snapshot.finalTextSource, privacy: .public)"
+            )
+            return
+        }
         let candidates = CorrectionDiffEngine.candidates(from: revision)
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else {
+            logger.notice(
+                "Auto Learn revision produced no candidates source=\(snapshot.finalTextSource, privacy: .public)"
+            )
+            return
+        }
 
         do {
             let insertedCount = try await pendingQueue.enqueue(candidates)
             if insertedCount > 0 {
                 logger.notice(
-                    "Queued \(insertedCount, privacy: .public) Auto Learn candidate(s) for AI review"
+                    "Queued \(insertedCount, privacy: .public) Auto Learn candidate(s) for AI review source=\(snapshot.finalTextSource, privacy: .public)"
                 )
                 await schedulePendingReview()
             }

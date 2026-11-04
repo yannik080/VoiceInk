@@ -278,11 +278,13 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
                             self.recordingState = .recording
 
-                            // Only retire the previous paste session once recording
-                            // has actually started. Preflight/permission failures
-                            // must leave it available for Auto Learn capture.
+                            // Only prepare Auto Learn once recording has actually
+                            // started. The open paste session stays observed so a
+                            // correction after this dictation still counts.
                             if AutoLearnSettings.isEnabled {
-                                await AutoLearnService.shared.recordingDidStart()
+                                await AutoLearnService.shared.recordingDidStart(
+                                    targetProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier
+                                )
                             }
 
                             await activeModeTask.value

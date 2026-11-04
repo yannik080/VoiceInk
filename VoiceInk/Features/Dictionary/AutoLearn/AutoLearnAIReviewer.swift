@@ -1,4 +1,5 @@
 import Foundation
+import LLMkit
 import OSLog
 
 @MainActor
@@ -121,12 +122,31 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         logger.notice(
             "Auto Learn review started provider=\(provider.rawValue, privacy: .public) model=\(loggedModelName, privacy: .public) candidates=\(candidates.count, privacy: .public)"
         )
-        let responseText = try await aiService.reviewAutoLearnCandidates(
-            payload: requestText,
-            systemPrompt: Self.reviewPrompt,
-            provider: provider,
-            modelName: modelName
-        )
+        let fallback = reviewFallback(for: provider, modelName: modelName, in: aiService)
+        let responseText: String
+        do {
+            responseText = try await aiService.reviewAutoLearnCandidates(
+                payload: requestText,
+                systemPrompt: Self.reviewPrompt,
+                provider: provider,
+                modelName: modelName,
+                clientRetries: fallback == nil
+            )
+        } catch {
+            // Groq's free tier shares a small per-minute token budget with
+            // dictation enhancement; a refused review moves to Cerebras like
+            // the enhancement does instead of failing.
+            guard let fallback, Self.isProviderRefusal(error) else { throw error }
+            logger.notice(
+                "Auto Learn review falling back provider=\(fallback.provider.rawValue, privacy: .public) model=\(fallback.model, privacy: .public)"
+            )
+            responseText = try await aiService.reviewAutoLearnCandidates(
+                payload: requestText,
+                systemPrompt: Self.reviewPrompt,
+                provider: fallback.provider,
+                modelName: fallback.model
+            )
+        }
         let candidateReviewDecisions = try decodeResponse(
             responseText,
             provider: provider,
@@ -211,6 +231,36 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         )
     }
 
+    /// Same route as dictation enhancement (see `EnhancementFallbackRoute`).
+    private func reviewFallback(
+        for provider: AIProvider,
+        modelName: String,
+        in aiService: AIService
+    ) -> (provider: AIProvider, model: String)? {
+        guard let route = EnhancementFallbackRoute.fallback(
+            forProvider: provider.rawValue,
+            model: modelName
+        ),
+            let fallbackProvider = AIProvider(rawValue: route.provider),
+            availableProviders(in: aiService).contains(fallbackProvider)
+        else {
+            return nil
+        }
+        return (fallbackProvider, route.model)
+    }
+
+    private static func isProviderRefusal(_ error: Error) -> Bool {
+        guard let error = error as? LLMKitError else { return false }
+        switch error {
+        case .httpError(let statusCode, _):
+            return statusCode == 429 || (500...599).contains(statusCode)
+        case .timeout:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func availableProviders(in aiService: AIService) -> [AIProvider] {
         aiService.connectedProviders.filter {
             AutoLearnProviderPolicy.isSupported($0)
@@ -287,7 +337,9 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
             return (nil, .invalidRequiredActionValues)
         }
 
-        if differsOnlyByLetterCase(incorrectTextToReplace, correctedVocabularyTerm) {
+        if differsOnlyByLetterCase(incorrectTextToReplace, correctedVocabularyTerm)
+            || !AutoLearnPhoneticGate.soundsAlike(incorrectTextToReplace, correctedVocabularyTerm)
+        {
             return (
                 AutoLearnReviewDecision(
                     candidateID: candidate.candidateID,
@@ -378,17 +430,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         provider: AIProvider,
         modelName: String
     ) throws -> [CandidateReviewDecision] {
-        let payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if payload.hasPrefix("```") {
-            logInvalidResponse(
-                payload,
-                provider: provider,
-                modelName: modelName,
-                reason: "markdown-code-fence"
-            )
-            throw ReviewError.invalidResponse
-        }
-
+        let payload = AutoLearnReviewResponse.decisionArrayPayload(from: text)
         let data = Data(payload.utf8)
 
         do {
@@ -429,7 +471,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
     }
 
     private static let reviewPrompt = """
-        Review speech-to-text corrections. Each candidate has originalText and correctedText containing the edit plus up to three surrounding words on each side.
+        Review speech-to-text corrections. Each candidate has originalText and correctedText containing the edit plus up to three surrounding words on each side. The text may be German, English, or a mix of both. The user corrected the recognizer's output by hand, so a correction that passes the gates below is evidence that the recognizer does not know the term.
 
         Mandatory personal-name rule: A personal name is one indivisible term. For a visible multiword personal name, incorrectTextToReplace and correctedVocabularyTerm must contain every visible name component, including every unchanged component. Apply this rule even when only a middle name, surname, particle, spacing, punctuation, or suffix changed. Returning only the changed fragment or one component of a visible multiword name is invalid. When only one personal-name component is visible, such as only a first name or only a surname, it may qualify for addReplacementOnly but must not be added to Vocabulary. Allow a single-word personal name into Vocabulary only when context clearly establishes that the person is genuinely known by that complete mononym, not merely because only one name component appears in the snippet. Never invent name components that are not visible.
 
@@ -439,22 +481,22 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
 
         1. Phonetic evidence: the changed source and destination spans must recognizably resemble two renderings of the same spoken term. Judge a multiword personal name collectively. Differences caused by accent, transliteration, word boundaries, hyphenation, or omitted diacritics may still be phonetic when the pronunciations plausibly correspond. Related meaning, context, specificity, private status, and Vocabulary usefulness are not themselves phonetic evidence. Reject absent or uncertain resemblance.
 
-        2. No semantic rewrite: reject edits that change meaning or replace coherent language—a description, role, category, purpose, location, relationship, criterion, synonym, or placeholder—with a specific person, place, product, service, or term. Discard them completely even when the destination qualifies for Vocabulary.
+        2. No semantic rewrite: reject edits that change meaning or replace coherent language—a description, role, category, purpose, location, relationship, criterion, synonym, or placeholder—with a specific person, place, product, service, or term. Discard them completely even when the destination qualifies for Vocabulary. A misrecognition that renders a name or term as similar-sounding ordinary words is not a semantic rewrite: "super base" → "Supabase", "Voice Inc" → "VoiceInk", "X code" → "Xcode", "Orka" → "Orca", "Klaud" → "Claude", "Wisper Flow" → "Wispr Flow". Replacing one real name, product, or word with a different one that does not sound alike ("Linear" → "Notion", "Slack" → "Teams", "Simulator" → "Emulator") is a content change, not a misrecognition; reject it.
 
         Only edits passing both gates may be accepted. Audit every acceptance against both gates before returning it; convert failures or uncertainty to rejectCorrection with both text fields null.
 
         Choose one learningAction:
 
         1. addReplacementAndVocabulary: the corrected term passes the Vocabulary gate and the original plausibly sounds like it.
-        2. addReplacementOnly: use for a distinctive, unambiguous, user-specific correction that is worth applying again but whose corrected term should not enter Vocabulary. This includes a learnable correction to a single visible first name or surname when the person's complete name is not visible. Never use this as a fallback for public, common, or generic terms.
+        2. addReplacementOnly: use for a distinctive, unambiguous correction that is worth applying again but whose corrected term should not enter Vocabulary. This includes a learnable correction to a single visible first name or surname when the person's complete name is not visible. Never use this for ordinary dictionary words or generic terms.
         3. addVocabularyOnly: the corrected term passes the Vocabulary gate and the pair passes the phonetic gate, but the source is too broad or ambiguous for a safe global replacement. Never use this for a partial personal name, coherent descriptions, semantic rewrites, deliberate abbreviations, or expansions.
-        4. rejectCorrection: nothing is safely reusable, including ordinary wording, grammar, style, meaning, facts, numbers, dates, abbreviations, expansions, changed qualifiers, editions, generic type words, and corrections a capable general-purpose ASR model should handle without permanent user-specific learning.
+        4. rejectCorrection: nothing is safely reusable, including ordinary wording, grammar, inflection, word order, style, meaning, facts, numbers, dates, abbreviations, expansions, changed qualifiers, editions, generic type words, and edits where the original already was a correct rendering of what was said.
 
-        Vocabulary is primarily for complete personal names. A person's first name, surname, or other single component must not enter Vocabulary by itself unless it is clearly the person's complete mononym. This personal-name restriction does not apply to qualifying non-person entities: a single-token internal brand, project, private product, username, specialized term, small organization, or uncommon local place may enter Vocabulary when it is genuinely user-specific, private, or obscure enough to improve recognition.
+        Vocabulary is for terms the recognizer gets wrong: complete personal names, and non-person names and technical terms such as brands, companies, products, apps, services, projects, programming languages, frameworks, libraries, tools, commands, file formats, usernames, places, and domain jargon. A person's first name, surname, or other single component must not enter Vocabulary by itself unless it is clearly the person's complete mononym. This personal-name restriction does not apply to non-person terms.
 
         Use context to identify user-specific entities. “Call”, “email”, “ask”, “invite”, or “send to” supports interpreting the adjacent text as a personal name. For a phonetically plausible personal name, spelling, apostrophe, spacing, hyphenation, and diacritic corrections are learnable—not formatting-only edits. A personal name remains learnable when it belongs to a well-known or public person. Labels such as “project”, “internal”, “repository”, “account”, “tenant”, or “pipeline” similarly support a user-specific entity. Context never substitutes for phonetic evidence or permits a semantic rewrite.
 
-        Do not learn ordinary words, brands, products, technologies, places, or organizations. Examples include Microsoft, Apple, Google, Xcode, Markdown, React, PostgreSQL, and GitHub. VoiceInk is user-specific and may be learned. Outside the user-specific contexts above, capitalization or proper-noun appearance alone is insufficient; when uncertain, reject.
+        Learn brands, products, technologies, places, and organizations—well-known ones included, such as Supabase, Xcode, GitHub, PostgreSQL, Tailwind, or Kubernetes—whenever the original is a phonetic misrecognition of them; use addReplacementAndVocabulary when the misrecognized form is specific enough to replace safely, otherwise addVocabularyOnly. Spelling, spacing, joining, and capitalization inside such a term (for example "Git Hub" → "GitHub", "post gres" → "Postgres", "Voice Ink" → "VoiceInk") are learnable when the words also changed in spelling or spacing. Do not learn ordinary dictionary words of German or English (common nouns, verbs, adjectives, function words), even when they were misrecognized as another ordinary word. Capitalization or proper-noun appearance alone is insufficient; when uncertain, reject.
 
         Reject case-only changes and partial unsafe mappings.
 

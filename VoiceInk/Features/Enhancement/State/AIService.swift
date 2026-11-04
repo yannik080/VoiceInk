@@ -767,11 +767,13 @@ class AIService: ObservableObject {
         try await voiceInkRefineService.enhance(transcript: transcript)
     }
 
+    /// - Parameter clientRetries: Pass `false` when the caller falls back to another provider itself.
     func reviewAutoLearnCandidates(
         payload: String,
         systemPrompt: String,
         provider: AIProvider,
-        modelName: String?
+        modelName: String?,
+        clientRetries: Bool = true
     ) async throws -> String {
         guard AutoLearnProviderPolicy.isSupported(provider) else {
             throw EnhancementError.notConfigured
@@ -783,7 +785,8 @@ class AIService: ObservableObject {
             messages: [.user(payload)],
             systemPrompt: systemPrompt,
             localUserPrompt: payload,
-            timeout: EnhancementRequestSettings.timeout
+            timeout: EnhancementRequestSettings.timeout,
+            clientRetries: clientRetries
         ).text
     }
 

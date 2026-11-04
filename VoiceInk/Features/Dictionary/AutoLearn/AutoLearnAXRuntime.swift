@@ -5,11 +5,13 @@ import OSLog
 final class AutoLearnAXRuntime: @unchecked Sendable {
     private struct Session {
         let token: AutoLearnPasteToken
+        let processID: pid_t
         let appElement: AXUIElement
         let targetElement: AXUIElement
-        let baselineFieldText: String
-        let pastedRange: NSRange
-        let pastedText: String
+        /// Every dictation into this field since it was entered or sent, the
+        /// latest last. Earlier ones stay observed, so a correction made after
+        /// dictating again still counts.
+        var observations: [AutoLearnFieldObservation]
     }
 
     private let queue = DispatchQueue(label: "com.prakashjoshipax.voiceink.auto-learn.accessibility")
@@ -19,11 +21,28 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
     )
     private let textReader = AutoLearnAXTextReader()
     private var session: Session?
+    /// Snapshots of dictations that ended while a new paste was captured.
+    private var finishedSnapshots: [AutoLearnFieldSnapshot] = []
 
-    func capturePastedText(text: String, processID: pid_t) async -> AutoLearnPasteToken? {
+    /// Called when recording starts so Chromium/Electron have the whole
+    /// dictation to build their accessibility tree before the paste.
+    func prepareTarget(processID: pid_t) async {
         await perform { [self] in
-            session = nil
+            guard AXIsProcessTrusted(),
+                processID != ProcessInfo.processInfo.processIdentifier
+            else { return }
+            let state = textReader.prepareWebAccessibility(processID: processID)
+            logger.notice("Auto Learn target prepared manualAX=\(state, privacy: .public)")
+        }
+    }
 
+    func capturePastedText(
+        text: String,
+        processID: pid_t,
+        attempt: Int,
+        isFinalAttempt: Bool
+    ) async -> AutoLearnCaptureOutcome {
+        await perform { [self] in
             guard AXIsProcessTrusted() else { return rejectCapture("accessibility-not-trusted") }
             guard processID != ProcessInfo.processInfo.processIdentifier else {
                 return rejectCapture("target-is-voiceink")
@@ -35,27 +54,35 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
 
             var matchedReading: AutoLearnAXTextReading?
             var pastedRange: NSRange?
+            var matchKind = ""
             var lastReading: AutoLearnAXTextReading?
 
             let readings = textReader.focusedReadings(processID: processID)
             for reading in readings {
                 lastReading = reading
-                if let resolvedRange = resolvedPastedRange(
+                if let resolved = resolvedPastedRange(
                     for: text,
                     selectionAfterPaste: reading.selection,
                     fieldText: reading.fieldText
                 ) {
                     matchedReading = reading
-                    pastedRange = resolvedRange
+                    pastedRange = resolved.range
+                    matchKind = resolved.match
                     break
                 }
             }
 
             guard let reading = matchedReading, let pastedRange else {
-                textReader.restoreWebAccessibility(processID: processID, appElement: AXUIElementCreateApplication(processID))
-                return rejectCapture(
-                    lastReading == nil ? "focused-text-reading-unavailable" : "pasted-range-invalid"
-                )
+                let reason = lastReading == nil
+                    ? "focused-text-reading-unavailable"
+                    : "pasted-range-invalid"
+                guard isFinalAttempt else { return .retryable }
+                var detail = "attempts=\(attempt) \(textReader.lastFocusDiagnostic)"
+                if let lastReading {
+                    let selection = lastReading.selection.map { "\($0.location)+\($0.length)" } ?? "none"
+                    detail += " fieldLength=\(lastReading.fieldText.utf16.count) pastedLength=\(text.utf16.count) selection=\(selection)"
+                }
+                return rejectCapture(reason, detail: detail)
             }
 
             let fieldText = reading.fieldText
@@ -65,36 +92,69 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
                 reading.appElement,
                 AutoLearnLimits.accessibilityTimeoutSeconds
             )
-            let token = AutoLearnPasteToken(id: UUID())
-            session = Session(
-                token: token,
-                appElement: reading.appElement,
-                targetElement: reading.targetElement,
+            var observations = carriedObservations(
+                into: reading.targetElement,
+                processID: processID,
+                fieldText: fieldText
+            )
+            observations.append(AutoLearnFieldObservation(
                 baselineFieldText: fieldText,
                 pastedRange: pastedRange,
                 pastedText: observedPastedText
+            ))
+            let token = AutoLearnPasteToken(id: UUID())
+            session = Session(
+                token: token,
+                processID: processID,
+                appElement: reading.appElement,
+                targetElement: reading.targetElement,
+                observations: observations
             )
-            return token
+            logger.notice(
+                "Auto Learn capture started attempt=\(attempt, privacy: .public) source=\(reading.source, privacy: .public) focus=\(reading.focusSource, privacy: .public) fieldLength=\(fieldText.utf16.count, privacy: .public) pastedLength=\(pastedRange.length, privacy: .public) match=\(matchKind, privacy: .public) dictations=\(observations.count, privacy: .public)"
+            )
+            return .captured(token)
         }
     }
 
-    func finishSnapshot(token: AutoLearnPasteToken) async -> AutoLearnFieldSnapshot? {
+    /// Records the current field text while the user edits. Chat apps clear
+    /// the field when a message is sent; the last sample before that keeps
+    /// the user's correction. Returns false once no dictation of the session
+    /// is left to observe.
+    func sampleField(token: AutoLearnPasteToken) async -> Bool {
         await perform { [self] in
-            guard let active = session, active.token == token else { return nil }
+            guard var active = session, active.token == token else { return true }
+            guard active.observations.contains(where: \.isTracking) else { return false }
+            guard let value = textReader.textValue(from: active.targetElement),
+                value.text.utf16.count <= AutoLearnLimits.maximumFieldUTF16Length
+            else { return true }
+
+            var results: [AutoLearnFieldObservation.SampleResult] = []
+            for index in active.observations.indices {
+                results.append(active.observations[index].record(value.text))
+            }
+            if results.contains(.disappeared) {
+                logger.notice("Auto Learn field cleared; keeping last observed text")
+            }
+            if results.contains(.lost) {
+                logger.notice("Auto Learn lost a dictation after the field was rewritten")
+            }
+            session = active
+            return active.observations.contains(where: \.isTracking)
+        }
+    }
+
+    /// Ends the session with `token` and returns its snapshots, together with
+    /// those of dictations that ended while the latest paste was captured.
+    func finishSnapshots(token: AutoLearnPasteToken?) async -> [AutoLearnFieldSnapshot] {
+        await perform { [self] in
+            var snapshots = finishedSnapshots
+            finishedSnapshots = []
+            guard let token, let active = session, active.token == token else { return snapshots }
             session = nil
 
-            defer { textReader.restoreWebAccessibility(processID: AXProcessID(active.appElement), appElement: active.appElement) }
-            guard let finalTextValue = textReader.textValue(from: active.targetElement) else { return nil }
-            let finalFieldText = finalTextValue.text
-            guard finalFieldText.utf16.count <= AutoLearnLimits.maximumFieldUTF16Length else { return nil }
-            guard !textIsExactlyEqual(finalFieldText, active.baselineFieldText) else { return nil }
-
-            return AutoLearnFieldSnapshot(
-                baselineFieldText: active.baselineFieldText,
-                finalFieldText: finalFieldText,
-                pastedRange: active.pastedRange,
-                originalPastedText: active.pastedText
-            )
+            snapshots += self.snapshots(of: active.observations, finalValue: readFinalValue(of: active))
+            return snapshots
         }
     }
 
@@ -105,31 +165,100 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         }
     }
 
-    func discard(token: AutoLearnPasteToken? = nil) async {
+    func discard() async {
         await perform { [self] in
-            guard token == nil || session?.token == token else { return }
-            if let active = session {
-                textReader.restoreWebAccessibility(processID: AXProcessID(active.appElement), appElement: active.appElement)
-            }
             session = nil
+            finishedSnapshots = []
         }
     }
 
-    private func AXProcessID(_ element: AXUIElement) -> pid_t {
-        var pid: pid_t = 0
-        _ = AXUIElementGetPid(element, &pid)
-        return pid
+    /// Dictations earlier pasted into the field that received the new paste.
+    /// A paste into another field ends the earlier session instead.
+    private func carriedObservations(
+        into targetElement: AXUIElement,
+        processID: pid_t,
+        fieldText: String
+    ) -> [AutoLearnFieldObservation] {
+        guard let previous = session else { return [] }
+        session = nil
+
+        guard previous.processID == processID,
+            CFEqual(previous.targetElement, targetElement)
+        else {
+            finishedSnapshots += snapshots(
+                of: previous.observations,
+                finalValue: readFinalValue(of: previous)
+            )
+            return []
+        }
+
+        var carried: [AutoLearnFieldObservation] = []
+        var ended: [AutoLearnFieldObservation] = []
+        for var observation in previous.observations {
+            if observation.isTracking {
+                // The paste itself never continues an earlier dictation.
+                _ = observation.record(fieldText, attachesAdjacentTyping: false)
+            }
+            if observation.isTracking {
+                carried.append(observation)
+            } else {
+                ended.append(observation)
+            }
+        }
+        let overflow = max(0, carried.count + 1 - AutoLearnLimits.maximumTrackedDictations)
+        ended += carried.prefix(overflow)
+        carried.removeFirst(overflow)
+        finishedSnapshots += snapshots(of: ended, finalValue: nil)
+        return carried
+    }
+
+    private func readFinalValue(of session: Session) -> String? {
+        guard session.observations.contains(where: \.isTracking),
+            let value = textReader.textValue(from: session.targetElement),
+            value.text.utf16.count <= AutoLearnLimits.maximumFieldUTF16Length
+        else {
+            return nil
+        }
+        return value.text
+    }
+
+    private func snapshots(
+        of observations: [AutoLearnFieldObservation],
+        finalValue: String?
+    ) -> [AutoLearnFieldSnapshot] {
+        observations.compactMap { observation in
+            let snapshot = observation.snapshot(finalValue: finalValue)
+            guard !snapshot.dictationIsUnchanged else {
+                logger.notice(
+                    "Auto Learn snapshot unchanged source=\(snapshot.finalTextSource, privacy: .public)"
+                )
+                return nil
+            }
+            return snapshot
+        }
+    }
+
+    /// Restores web accessibility everywhere VoiceInk switched it on, after
+    /// Auto Learn is turned off. While it is on, the setting stays on: turning
+    /// it off makes Chromium/Electron drop their accessibility tree, and
+    /// rebuilding it in a large window takes longer than the capture window.
+    func restoreAllWebAccessibility() async {
+        await perform { [self] in
+            for processID in textReader.webAccessibilityProcessIDs {
+                textReader.restoreWebAccessibility(processID: processID)
+            }
+        }
     }
 
     private func textIsExactlyEqual(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf16.elementsEqual(rhs.utf16)
     }
 
-    private func rejectCapture(_ reason: String) -> AutoLearnPasteToken? {
+    private func rejectCapture(_ reason: String, detail: String = "") -> AutoLearnCaptureOutcome {
         logger.notice(
-            "Auto Learn capture rejected reason=\(reason, privacy: .public)"
+            "Auto Learn capture rejected reason=\(reason, privacy: .public) \(detail, privacy: .public)"
         )
-        return nil
+        return .rejected
     }
 
     private func focusedElementMatches(_ targetElement: AXUIElement, in appElement: AXUIElement) -> Bool {
@@ -199,6 +328,27 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
     }
 
     private func resolvedPastedRange(
+        for pastedText: String,
+        selectionAfterPaste: NSRange?,
+        fieldText: String
+    ) -> (range: NSRange, match: String)? {
+        if let range = strictPastedRange(
+            for: pastedText,
+            selectionAfterPaste: selectionAfterPaste,
+            fieldText: fieldText
+        ) {
+            return (range, "strict")
+        }
+        // Rich-text composers rewrite whitespace, e.g. blank lines between
+        // paragraphs. The session then uses the field's own representation.
+        return AutoLearnPastedRangeLocator.whitespaceInsensitiveRange(
+            of: pastedText,
+            in: fieldText,
+            nearUTF16Location: selectionAfterPaste.map { NSMaxRange($0) }
+        ).map { ($0, "whitespace") }
+    }
+
+    private func strictPastedRange(
         for pastedText: String,
         selectionAfterPaste: NSRange?,
         fieldText: String

@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -32,9 +33,19 @@ final class AutoLearnAXTextReader {
     private static let rangeForMarkersAttribute = "AXTextMarkerRangeForUnorderedTextMarkers" as CFString
     private static let stringForMarkerRangeAttribute = "AXStringForTextMarkerRange" as CFString
 
+    /// Web accessibility this reader switched on. `previousValue` is nil when
+    /// the app does not report the attribute (common for Chromium browsers).
+    private struct ManualAccessibilityLease {
+        let previousValue: Bool?
+    }
+
     private var manualAccessibilityLastEnabledAt: [pid_t: UInt64] = [:]
     private var manualAccessibilityUnsupportedUntil: [pid_t: UInt64] = [:]
-    private var manualAccessibilityPreviousValue: [pid_t: Bool] = [:]
+    private var manualAccessibilityLeases: [pid_t: ManualAccessibilityLease] = [:]
+
+    /// Privacy-safe description of the last focus lookup: roles, flags and
+    /// counts only, never field content.
+    private(set) var lastFocusDiagnostic = ""
 
     func focusedReadings(processID: pid_t) -> [AutoLearnAXTextReading] {
         let appElement = AXUIElementCreateApplication(processID)
@@ -42,23 +53,36 @@ final class AutoLearnAXTextReader {
             appElement,
             AutoLearnLimits.captureAccessibilityTimeoutSeconds
         )
-        enableWebAccessibilityIfNeeded(processID: processID, appElement: appElement)
+        let webAccessibilityState = enableWebAccessibility(
+            processID: processID,
+            appElement: appElement
+        )
 
         var candidates: [(element: AXUIElement, source: String)] = []
+        var diagnostics = ["manualAX=\(webAccessibilityState)"]
         if let appFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: appElement) {
             appendUnique(appFocused, source: "application-focus", to: &candidates)
+        } else {
+            diagnostics.append("appFocus=none")
         }
 
         let systemWide = AXUIElementCreateSystemWide()
-        if let systemFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: systemWide),
-            owningProcessID(of: systemFocused) == processID
-        {
-            appendUnique(systemFocused, source: "system-focus", to: &candidates)
+        if let systemFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: systemWide) {
+            if owningProcessID(of: systemFocused) == processID {
+                appendUnique(systemFocused, source: "system-focus", to: &candidates)
+            } else {
+                diagnostics.append("systemFocus=other-process")
+            }
+        } else {
+            diagnostics.append("systemFocus=none")
         }
 
         var readings: [AutoLearnAXTextReading] = []
         for candidate in candidates {
-            guard isEditable(candidate.element) else { continue }
+            let role = copyString(kAXRoleAttribute as CFString, from: candidate.element) ?? "unknown"
+            let editable = isEditable(candidate.element)
+            diagnostics.append("\(candidate.source)=\(role):editable=\(editable)")
+            guard editable else { continue }
 
             let candidateReadings = makeReadings(
                 from: candidate.element,
@@ -67,14 +91,34 @@ final class AutoLearnAXTextReader {
             )
             readings.append(contentsOf: candidateReadings)
         }
-        if readings.isEmpty { restoreWebAccessibility(processID: processID, appElement: appElement) }
+        diagnostics.append("readings=\(readings.count)")
+        lastFocusDiagnostic = diagnostics.joined(separator: " ")
         return readings
     }
 
-    func restoreWebAccessibility(processID: pid_t, appElement: AXUIElement) {
-        guard let previous = manualAccessibilityPreviousValue.removeValue(forKey: processID) else { return }
-        _ = AXUIElementSetAttributeValue(appElement, Self.manualAccessibilityAttribute, previous ? kCFBooleanTrue : kCFBooleanFalse)
+    /// Switches Chromium/Electron accessibility on before VoiceInk needs to
+    /// read the field. Those apps build their accessibility tree only after
+    /// `AXManualAccessibility` is set, and they build it asynchronously.
+    @discardableResult
+    func prepareWebAccessibility(processID: pid_t) -> String {
+        let appElement = AXUIElementCreateApplication(processID)
+        AXUIElementSetMessagingTimeout(appElement, AutoLearnLimits.accessibilityTimeoutSeconds)
+        return enableWebAccessibility(processID: processID, appElement: appElement)
+    }
+
+    func restoreWebAccessibility(processID: pid_t) {
         manualAccessibilityLastEnabledAt.removeValue(forKey: processID)
+        guard let lease = manualAccessibilityLeases.removeValue(forKey: processID) else { return }
+        if lease.previousValue == true { return }
+        // Unknown previous state: leave it on while VoiceOver may depend on it.
+        if lease.previousValue == nil, NSWorkspace.shared.isVoiceOverEnabled { return }
+        let appElement = AXUIElementCreateApplication(processID)
+        AXUIElementSetMessagingTimeout(appElement, AutoLearnLimits.accessibilityTimeoutSeconds)
+        _ = AXUIElementSetAttributeValue(appElement, Self.manualAccessibilityAttribute, kCFBooleanFalse)
+    }
+
+    var webAccessibilityProcessIDs: [pid_t] {
+        Array(manualAccessibilityLeases.keys)
     }
 
     private func isEditable(_ element: AXUIElement) -> Bool {
@@ -217,22 +261,21 @@ final class AutoLearnAXTextReader {
         )
     }
 
-    private func enableWebAccessibilityIfNeeded(
+    private func enableWebAccessibility(
         processID: pid_t,
         appElement: AXUIElement
-    ) {
+    ) -> String {
         let now = DispatchTime.now().uptimeNanoseconds
-        if let until = manualAccessibilityUnsupportedUntil[processID], now < until { return }
+        if let until = manualAccessibilityUnsupportedUntil[processID], now < until { return "unsupported" }
         if let lastEnabledAt = manualAccessibilityLastEnabledAt[processID],
             now - lastEnabledAt < 1_000_000_000
         {
-            return
+            return "enabled"
         }
 
-        guard let previousValue = copyBool(Self.manualAccessibilityAttribute, from: appElement) else {
-            return
-        }
-        manualAccessibilityPreviousValue[processID] = previousValue
+        // Chromium browsers often do not answer the getter but still honour the
+        // setter, so a missing value must not prevent enabling it.
+        let currentValue = copyBool(Self.manualAccessibilityAttribute, from: appElement)
         let result = AXUIElementSetAttributeValue(
             appElement,
             Self.manualAccessibilityAttribute,
@@ -240,11 +283,18 @@ final class AutoLearnAXTextReader {
         )
         switch result {
         case .success:
+            if manualAccessibilityLeases[processID] == nil, currentValue != true {
+                manualAccessibilityLeases[processID] = ManualAccessibilityLease(
+                    previousValue: currentValue
+                )
+            }
             manualAccessibilityLastEnabledAt[processID] = now
+            return currentValue == true ? "already-on" : "set"
         case .attributeUnsupported, .notImplemented:
             manualAccessibilityUnsupportedUntil[processID] = now + 60_000_000_000
+            return "unsupported"
         default:
-            break
+            return "set-failed-\(result.rawValue)"
         }
     }
 
