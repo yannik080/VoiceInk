@@ -76,6 +76,8 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
         )
     }
 
+    /// Dot and wave keep the compact 118-pt bar in every state and stay centred when the glass
+    /// grows. The copy button sits just outside the bar, mirroring the close button.
     private var controlBar: some View {
         HStack(spacing: 0) {
             Group {
@@ -93,7 +95,7 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
                     )
                 }
             }
-            .padding(.leading, 3)
+            .frame(width: RecorderGlassMetrics.hitArea, height: RecorderGlassMetrics.hitArea)
 
             Spacer(minLength: 0)
 
@@ -103,39 +105,47 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
             )
 
             Spacer(minLength: 0)
-
-            // Mirrors the close button, so the wave stays centred while an answer is shown.
-            if hasAssistantResponse {
-                Group {
-                    if assistantSession.messages.isEmpty {
-                        Color.clear
-                            .frame(width: RecorderGlassMetrics.hitArea, height: RecorderGlassMetrics.hitArea)
-                    } else {
-                        RecorderCopyButton(
-                            text: conversationText,
-                            label: String(localized: "Copy conversation")
-                        )
-                    }
-                }
-                .padding(.trailing, 3)
+        }
+        .padding(.leading, RecorderGlassMetrics.barLeadingInset)
+        .padding(.trailing, RecorderGlassMetrics.barTrailingInset)
+        .frame(width: RecorderGlassMetrics.compactWidth, height: RecorderGlassMetrics.barHeight)
+        .overlay(alignment: .trailing) {
+            if hasAssistantResponse, !assistantSession.messages.isEmpty {
+                RecorderCopyButton(
+                    text: conversationText,
+                    label: String(localized: "Copy conversation")
+                )
+                .offset(x: RecorderGlassMetrics.hitArea - RecorderGlassMetrics.barTrailingInset)
             }
         }
-        .frame(height: RecorderGlassMetrics.barHeight)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(RecorderGlassMetrics.dividerOpacity))
+            .frame(height: RecorderGlassMetrics.dividerHeight)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if hasAssistantResponse {
-                AssistantPanelView(
-                    session: assistantSession,
-                    liveFollowUpText: liveAssistantFollowUpText,
-                    style: .glass,
-                    onSend: onAssistantFollowUp
-                )
+                VStack(spacing: 0) {
+                    AssistantPanelView(
+                        session: assistantSession,
+                        liveFollowUpText: liveAssistantFollowUpText,
+                        style: .glass,
+                        onSend: onAssistantFollowUp
+                    )
+                    divider
+                }
                 .transition(textTransition)
             } else if hasLiveTranscript {
-                RecorderGlassLiveText(text: stateProvider.partialTranscript)
-                    .transition(textTransition)
+                VStack(spacing: 0) {
+                    RecorderGlassLiveText(text: stateProvider.partialTranscript)
+                    divider
+                }
+                .transition(textTransition)
             }
             controlBar
         }
@@ -144,9 +154,9 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
         .animation(layoutAnimation, value: isExpanded)
         .animation(layoutAnimation, value: width)
         .opacity(hasAppeared ? 1 : 0)
-        .scaleEffect(hasAppeared || reduceMotion ? 1 : 0.96, anchor: .bottom)
+        .scaleEffect(hasAppeared || reduceMotion ? 1 : 0.9, anchor: .bottom)
         .onAppear {
-            withAnimation(.easeOut(duration: 0.12)) { hasAppeared = true }
+            withAnimation(.spring(response: 0.14, dampingFraction: 0.85)) { hasAppeared = true }
         }
         .gesture(WindowDragGesture())
         .allowsWindowActivationEvents()

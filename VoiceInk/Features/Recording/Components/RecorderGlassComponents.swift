@@ -23,6 +23,13 @@ enum RecorderGlassMetrics {
     static let assistantWidth: CGFloat = 520
     static let hitArea: CGFloat = 28
     static let roundButtonSize: CGFloat = 21
+    /// The bar keeps its compact width in every state and sits centred in wider glass.
+    /// The dot hugs the leading end; the trailing inset pulls the wave towards the middle.
+    static let barLeadingInset: CGFloat = 3
+    static let barTrailingInset: CGFloat = 12
+    /// Hairline between folded-out text and the bar.
+    static let dividerHeight: CGFloat = 0.5
+    static let dividerOpacity: Double = 0.12
 
     static var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .circular)
@@ -279,23 +286,72 @@ struct RecorderLiveDotButton: View {
         face != .ready && face != .recording
     }
 
-    private var showsHoverDisc: Bool {
+    /// Hover turns the dot into a white disc with start (dot) or stop (square).
+    private var showsControl: Bool {
         isHovering && !isDisabled
+    }
+
+    /// White rim behind the mark: hidden when ready, a ring while starting and recording,
+    /// a disc on hover.
+    private var rimDiameter: CGFloat {
+        if showsControl { return 20 }
+        switch face {
+        case .starting, .recording: return 12
+        default: return 8
+        }
+    }
+
+    private var rimOpacity: Double {
+        if showsControl { return 0.95 }
+        switch face {
+        case .starting: return 0.5
+        case .recording: return 0.95
+        default: return 0
+        }
+    }
+
+    private var markSize: CGFloat {
+        switch face {
+        case .ready: return showsControl ? 9 : 8
+        case .starting: return 9
+        case .recording: return showsControl ? 8 : 9
+        default: return 8
+        }
+    }
+
+    private var markCornerRadius: CGFloat {
+        face == .recording && showsControl ? 2 : markSize / 2
+    }
+
+    private var markColor: Color {
+        if showsControl { return RecorderGlassColors.recordingOnWhite }
+        switch face {
+        case .ready: return Color.white.opacity(0.75)
+        case .starting: return RecorderGlassColors.recordingOnWhite.opacity(0.6)
+        case .recording: return RecorderGlassColors.recordingOnWhite
+        default: return .clear
+        }
+    }
+
+    private var stateAnimation: Animation {
+        .spring(response: 0.14, dampingFraction: 0.85)
     }
 
     var body: some View {
         Button(action: action) {
             ZStack {
-                if showsHoverDisc {
-                    hoverDisc.transition(.opacity)
-                } else {
-                    mark.transition(.opacity)
-                }
+                Circle()
+                    .fill(Color.white.opacity(rimOpacity))
+                    .frame(width: rimDiameter, height: rimDiameter)
+                RoundedRectangle(cornerRadius: markCornerRadius, style: .continuous)
+                    .fill(markColor)
+                    .frame(width: markSize, height: markSize)
+                workIndicator
             }
             .frame(width: RecorderGlassMetrics.hitArea, height: RecorderGlassMetrics.hitArea)
             .contentShape(Circle())
-            .animation(.easeOut(duration: 0.12), value: face)
-            .animation(.easeOut(duration: 0.1), value: showsHoverDisc)
+            .animation(stateAnimation, value: face)
+            .animation(.easeOut(duration: 0.16), value: showsControl)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
@@ -305,48 +361,23 @@ struct RecorderLiveDotButton: View {
     }
 
     @ViewBuilder
-    private var mark: some View {
+    private var workIndicator: some View {
         switch face {
-        case .ready:
-            Circle()
-                .fill(Color.white.opacity(0.75))
-                .frame(width: 9, height: 9)
-        case .starting:
-            Circle()
-                .fill(Color.white.opacity(0.4))
-                .frame(width: 9, height: 9)
-        case .recording:
-            Circle()
-                .fill(RecorderGlassColors.recordingOnWhite)
-                .overlay(Circle().strokeBorder(Color.white, lineWidth: 1.5))
-                .frame(width: 11, height: 11)
-        case .busy:
-            Circle()
-                .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
-                .frame(width: 9, height: 9)
         case .transcribing:
             RecorderGlassSpinner()
+                .transition(.opacity)
         case .enhancing:
             Image(systemName: "sparkle")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color.white.opacity(0.86))
-        }
-    }
-
-    private var hoverDisc: some View {
-        ZStack {
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
+                .transition(.opacity)
+        case .busy:
             Circle()
-                .fill(Color.white.opacity(0.88))
-                .frame(width: RecorderGlassMetrics.roundButtonSize, height: RecorderGlassMetrics.roundButtonSize)
-            if face == .recording {
-                RoundedRectangle(cornerRadius: 1.8, style: .continuous)
-                    .fill(RecorderGlassColors.recordingOnWhite)
-                    .frame(width: 8, height: 8)
-            } else {
-                Circle()
-                    .fill(RecorderGlassColors.recordingOnWhite)
-                    .frame(width: 8, height: 8)
-            }
+                .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.5)
+                .frame(width: 9, height: 9)
+                .transition(.opacity)
+        default:
+            EmptyView()
         }
     }
 
@@ -441,13 +472,13 @@ struct RecorderCopyButton: View {
 
 // MARK: - Glass Live Text
 
-/// The live transcript above the bar, in the same glass. Its height follows the text up to four
+/// The live transcript above the bar, in the same glass. Its height follows the text up to three
 /// lines, then it scrolls and keeps the newest words in view.
 struct RecorderGlassLiveText: View {
     let text: String
 
-    /// Four lines of 12-pt text (about 57 pt) plus the 12 pt of insets fit without scrolling.
-    static let maxHeight: CGFloat = 72
+    /// Three lines of 12-pt text plus the 12 pt of insets; longer text scrolls.
+    static let maxHeight: CGFloat = 56
 
     @State private var textHeight: CGFloat = 0
 
@@ -468,7 +499,7 @@ struct RecorderGlassLiveText: View {
                 LinearGradient(
                     stops: [
                         .init(color: isScrolling ? .clear : .black, location: 0),
-                        .init(color: .black, location: 0.2),
+                        .init(color: .black, location: 0.18),
                         .init(color: .black, location: 1),
                     ],
                     startPoint: .top,
@@ -488,8 +519,7 @@ struct RecorderGlassLiveText: View {
             .foregroundStyle(Color.white)
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
-            .padding(.bottom, 2)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
     }
 }

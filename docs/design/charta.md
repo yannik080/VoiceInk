@@ -84,3 +84,6 @@ Außenbalken bleiben bei rund einem Fünftel der Mitte, sonst liest sie sich als
 - 2026-11-04: Charta aus geretteten Sitzungsprotokollen wiederhergestellt, nachdem der Quellordner
   verloren ging. Prinzipien, Negativ-Liste und Token-Tabelle sind wörtlich erhalten. Spätere
   Einträge im Gelernt-Log nach dem 28.09. sind nicht erhalten.
+- 04.11.2026: Pille im Wiederaufbau wirkte beim Aufnehmen länger. Ursache: Leiste lief über die
+  ganze Glasbreite statt fest 118 pt mittig zu bleiben. Maße aus der Referenz-App ausgelesen und
+  übernommen (Brief, Abschnitt geometrie).
