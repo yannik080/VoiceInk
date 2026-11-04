@@ -9,8 +9,31 @@ weiterhin. Produktname und Release-Bundle-ID bleiben für vorhandene Benutzerdat
 - Eigener Fork: https://github.com/yannik080/VoiceInk
 - `origin`: eigener Fork
 - `upstream`: https://github.com/Beingpax/VoiceInk
-- Arbeitsbranch: `yannik/local`
+- Arbeitsbranch: `yannik/wiederaufbau` (ab 04.11.2026, Basis `yannik/local`)
 - Ausgangsstand: `5fd71515089f54a2698cda8ec0013b9cd0b3e417` (VoiceInk 2.20)
+
+## Wiederaufbau (04.11.2026)
+
+Die lokalen Commits vom 28.09. bis 21.10.2026 wurden nie gepusht und gingen mit dem
+Quellordner verloren. Sie sind auf `yannik/wiederaufbau` aus geretteten Sitzungsprotokollen
+wiederhergestellt bzw. nach Doku und Referenz-App nachgebaut. **Jeder Commit wird sofort
+nach GitHub gepusht.** Referenz-App des verlorenen Stands:
+`~/Library/Application Support/VoiceInk Local Backups/2026-11-04-referenz-vor-wiederaufbau/`.
+
+| Funktion | Commit | Herkunft |
+|---|---|---|
+| Aufnahmeklänge, „Knopf tief, satt“ als Standard | `2e937e2` | Klänge aus der App, Code nachgebaut |
+| Hybrid-Kurzbefehl wie Wispr Flow, Doppeltipp-Fix | `b6a9d5e` | wörtlich gerettet, Test teils nachgebaut |
+| Robuste Medienpause, Live-Inhalte stumm statt pausiert (neu) | `eb32e34` | Pause gerettet, Live-Erkennung neu |
+| Lateinische Schriftvorgabe für Parakeet v3 | `eb1f18c` | gerettet |
+| Mini-Recorder in Liquid Glass, Charta `docs/design/charta.md` | `3c4cb45`, `11fe77a` | nach Charta nachgebaut |
+| KI-Verbesserung: ein Versuch je Anfrage, Retry-Regel, Cerebras-Ersatz, YAN-431 | `15abb90` | überwiegend gerettet |
+| Auto-Learn (YAN-323) | `a46f653` | wörtlich wiedergegeben |
+
+Droppy Island wurde bewusst nicht wiederaufgebaut.
+
+Logiktests: `for f in scripts/check-*.sh; do bash "$f"; done` (der Output-Check nimmt
+optional `VOICEINK_INCIDENT_JSON` für den Vorfall #950).
 
 ## Bauen
 
