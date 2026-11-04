@@ -58,3 +58,10 @@ Livestream lief weiter) ist behoben: dann wird wie bisher pausiert. Glas-Recorde
 Dokument, dunklem Editor und buntem Hintergrund gerendert und geprüft.
 
 Offen: Installation mit Sicherung und Abnahme durch Yannik; Live-stumm mit echtem Stream prüfen.
+
+## Nachtrag 04.11.2026: Pillen-Geometrie
+
+Yannik: Pille wirkte beim Aufnehmen länger und anders proportioniert. Ursache: Die Leiste lief über die
+ganze Glasbreite (300 pt bei Live-Text), statt fest 118 × 34 mittig zu bleiben. Maße aus dem Maschinencode
+der Referenz-App übernommen (Innenabstand 3/12, Punktgrößen, Haarlinie, Live-Text höchstens 56 pt).
+Commit `ef6a9fa`, installiert und geprüft (Binary identisch, Signatur gültig, 1711 Transkriptionen).
