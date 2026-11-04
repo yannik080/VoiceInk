@@ -332,8 +332,7 @@ struct QuickHistoryDetailActionBar: View {
                 )
                 await MainActor.run {
                     transcription.enhancedText = result.text
-                    transcription.aiEnhancementModelName =
-                        configuration.modelName ?? configuration.provider?.defaultModel
+                    transcription.aiEnhancementModelName = result.modelName
                     transcription.promptName =
                         result.promptName ?? configuration.prompt?.title
                     transcription.enhancementDuration = result.duration

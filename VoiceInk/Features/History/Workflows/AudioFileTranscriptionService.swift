@@ -133,8 +133,7 @@ class AudioTranscriptionService: ObservableObject {
                         enhancedText: enhancementResult.text,
                         audioFileURL: permanentURLString,
                         transcriptionModelName: model.displayName,
-                        aiEnhancementModelName: enhancementConfiguration.modelName
-                            ?? enhancementConfiguration.provider?.defaultModel,
+                        aiEnhancementModelName: enhancementResult.modelName,
                         promptName: enhancementResult.promptName
                             ?? enhancementConfiguration.prompt?.title,
                         transcriptionDuration: transcriptionDuration,
@@ -162,11 +161,10 @@ class AudioTranscriptionService: ObservableObject {
                     )
                 } catch {
                     let failureDescription = EnhancementFailureFormatter.description(for: error)
-                    let failureMessage = EnhancementFailureFormatter.message(description: failureDescription)
                     let newTranscription = Transcription(
                         text: originalText,
                         duration: duration,
-                        enhancedText: failureMessage,
+                        enhancedText: nil,
                         audioFileURL: permanentURLString,
                         transcriptionModelName: model.displayName,
                         aiEnhancementModelName: enhancementConfiguration.modelName

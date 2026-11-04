@@ -7,13 +7,17 @@ struct AIChatCompletionResult: Sendable {
 }
 
 extension AIService {
+    /// - Parameter clientRetries: Whether LLMkit may repeat HTTP 429/5xx and network failures itself.
+    ///   Pass `false` when the caller has its own retry loop; OpenAI-compatible providers then get one
+    ///   request per call.
     func performChatCompletion(
         provider: AIProvider,
         modelName: String?,
         messages: [ChatMessage],
         systemPrompt: String? = nil,
         localUserPrompt: String? = nil,
-        timeout: TimeInterval = 30
+        timeout: TimeInterval = 30,
+        clientRetries: Bool = true
     ) async throws -> AIChatCompletionResult {
         let resolvedModel = modelName?.isEmpty == false ? modelName! : selectedModel(for: provider)
 
@@ -68,13 +72,13 @@ extension AIService {
             else {
                 throw EnhancementError.notConfigured
             }
-            result = try await OpenAILLMClient.chatCompletion(
+            result = try await openAICompatibleCompletion(
+                clientRetries: clientRetries,
                 baseURL: baseURL,
                 apiKey: customConfiguration.apiKey,
                 model: customConfiguration.modelName,
                 messages: messages,
                 systemPrompt: systemPrompt,
-                temperature: 0.3,
                 timeout: timeout
             )
         case .voiceInkRefine:
@@ -105,13 +109,13 @@ extension AIService {
                 for: provider,
                 modelName: resolvedModel
             )
-            result = try await OpenAILLMClient.chatCompletion(
+            result = try await openAICompatibleCompletion(
+                clientRetries: clientRetries,
                 baseURL: baseURL,
                 apiKey: try chatAPIKey(for: provider, modelName: resolvedModel),
                 model: resolvedModel,
                 messages: messages,
                 systemPrompt: systemPrompt,
-                temperature: 0.3,
                 reasoningEffort: reasoningEffort,
                 extraBody: extraBody,
                 timeout: timeout
@@ -141,6 +145,43 @@ extension AIService {
             throw EnhancementError.enhancementFailed
         }
         return filteredResult
+    }
+
+    private func openAICompatibleCompletion(
+        clientRetries: Bool,
+        baseURL: URL,
+        apiKey: String,
+        model: String,
+        messages: [ChatMessage],
+        systemPrompt: String?,
+        reasoningEffort: String? = nil,
+        extraBody: [String: Any]? = nil,
+        timeout: TimeInterval
+    ) async throws -> String {
+        if clientRetries {
+            return try await OpenAILLMClient.chatCompletion(
+                baseURL: baseURL,
+                apiKey: apiKey,
+                model: model,
+                messages: messages,
+                systemPrompt: systemPrompt,
+                temperature: 0.3,
+                reasoningEffort: reasoningEffort,
+                extraBody: extraBody,
+                timeout: timeout
+            )
+        }
+        return try await SingleAttemptChatCompletion.openAICompatible(
+            baseURL: baseURL,
+            apiKey: apiKey,
+            model: model,
+            messages: messages,
+            systemPrompt: systemPrompt,
+            temperature: 0.3,
+            reasoningEffort: reasoningEffort,
+            extraBody: extraBody,
+            timeout: timeout
+        )
     }
 
     private func chatAPIKey(for provider: AIProvider, modelName: String) throws -> String {

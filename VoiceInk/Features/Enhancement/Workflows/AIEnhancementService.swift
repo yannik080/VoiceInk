@@ -6,6 +6,8 @@ import os
 
 struct AIEnhancementResult: Sendable {
     let text: String
+    /// The model that actually answered. It differs from the configured one after a fallback.
+    let modelName: String
     let duration: TimeInterval
     let promptName: String?
     let systemMessage: String?
@@ -33,7 +35,7 @@ class AIEnhancementService: ObservableObject {
         EnhancementRequestSettings.timeout
     }
     private let rateLimitInterval: TimeInterval = 1.0
-    private var lastRequestTime: Date?
+    private var lastRequestTimes: [AIProvider: Date] = [:]
     private let modelContext: ModelContext
 
     @Published var lastCapturedClipboard: String?
@@ -97,14 +99,16 @@ class AIEnhancementService: ObservableObject {
         return APIKeyManager.shared.hasAPIKey(forProvider: provider.rawValue)
     }
 
-    private func waitForRateLimit() async throws {
-        if let lastRequest = lastRequestTime {
+    /// Spaces requests to the same provider by `rateLimitInterval`. A request to another provider,
+    /// such as the fallback after a refusal, is not delayed by it.
+    private func waitForRateLimit(for provider: AIProvider) async throws {
+        if let lastRequest = lastRequestTimes[provider] {
             let timeSinceLastRequest = Date().timeIntervalSince(lastRequest)
             if timeSinceLastRequest < rateLimitInterval {
                 try await Task.sleep(nanoseconds: UInt64((rateLimitInterval - timeSinceLastRequest) * 1_000_000_000))
             }
         }
-        lastRequestTime = Date()
+        lastRequestTimes[provider] = Date()
     }
 
     private func getSystemMessage(
@@ -209,6 +213,10 @@ class AIEnhancementService: ObservableObject {
                 guard !filteredResult.isEmpty else {
                     throw EnhancementError.enhancementFailed
                 }
+                guard !AIEnhancementOutputFilter.hasIntroducedRepetition(in: filteredResult, source: text) else {
+                    logger.warning("Rejected enhancement with introduced repetition; preserving the transcript")
+                    throw EnhancementError.invalidResponse
+                }
                 return (
                     filteredResult,
                     nil,
@@ -234,7 +242,7 @@ class AIEnhancementService: ObservableObject {
         )
 
         if provider != .openRouter, provider != .ollama, provider != .localCLI {
-            try await waitForRateLimit()
+            try await waitForRateLimit(for: provider)
         }
 
         do {
@@ -244,7 +252,8 @@ class AIEnhancementService: ObservableObject {
                 messages: [.user(formattedText)],
                 systemPrompt: systemMessage,
                 localUserPrompt: formattedText,
-                timeout: requestTimeout
+                timeout: requestTimeout,
+                clientRetries: false
             )
             if let openRouterCompletion = completion.openRouterCompletion {
                 let routedProvider = openRouterCompletion.provider ?? "unknown"
@@ -260,11 +269,17 @@ class AIEnhancementService: ObservableObject {
             guard provider == .ollama || provider == .localCLI || !filteredResult.isEmpty else {
                 throw EnhancementError.enhancementFailed
             }
+            guard !AIEnhancementOutputFilter.hasIntroducedRepetition(in: filteredResult, source: text) else {
+                logger.warning("Rejected enhancement with introduced repetition; preserving the transcript")
+                throw EnhancementError.invalidResponse
+            }
             return (
                 filteredResult,
                 systemMessage,
                 formattedText
             )
+        } catch SingleAttemptChatCompletion.ResponseError.outputTruncated {
+            throw EnhancementError.outputTruncated
         } catch let error as LLMKitError {
             throw mapLLMKitError(error)
         } catch let error as LocalAIError {
@@ -314,53 +329,81 @@ class AIEnhancementService: ObservableObject {
         EnhancementRequestSettings.retryOnTimeout
     }
 
+    private func retryFailure(for error: EnhancementError) -> EnhancementRetryPolicy.Failure {
+        switch error {
+        case .networkError: return .networkError
+        case .serverError: return .serverError
+        case .rateLimitExceeded: return .rateLimitExceeded
+        case .timeout: return .timeout
+        default: return .other
+        }
+    }
+
+    /// The same enhancement on another provider, or `nil` when none is set up (see `EnhancementFallbackRoute`).
+    private func fallbackConfiguration(for configuration: EnhancementRuntimeConfiguration) -> EnhancementRuntimeConfiguration? {
+        guard let provider = configuration.provider,
+            let route = EnhancementFallbackRoute.fallback(
+                forProvider: provider.rawValue,
+                model: configuration.modelName ?? provider.defaultModel
+            ),
+            let fallbackProvider = AIProvider(rawValue: route.provider)
+        else {
+            return nil
+        }
+        let fallback = configuration.replacingProvider(fallbackProvider, modelName: route.model)
+        return isConfigured(for: fallback) ? fallback : nil
+    }
+
     private func makeRequestWithRetry(
         text: String,
         configuration: EnhancementRuntimeConfiguration,
         contextSnapshot: RecordingContextSnapshot?,
         maxAttempts: Int = EnhancementRequestSettings.maximumAttempts,
         initialDelay: TimeInterval = 1.0
-    ) async throws -> (text: String, systemMessage: String?, userMessage: String?) {
+    ) async throws -> (text: String, systemMessage: String?, userMessage: String?, modelName: String) {
         var retries = 0
         var currentDelay = initialDelay
+        var activeConfiguration = configuration
+        var pendingFallback = fallbackConfiguration(for: configuration)
 
         while retries < maxAttempts {
             do {
-                return try await makeRequest(
+                let result = try await makeRequest(
                     text: text,
-                    configuration: configuration,
+                    configuration: activeConfiguration,
                     contextSnapshot: contextSnapshot
                 )
+                let modelName = activeConfiguration.modelName ?? activeConfiguration.provider?.defaultModel ?? ""
+                return (result.text, result.systemMessage, result.userMessage, modelName)
             } catch let error as EnhancementError {
-                switch error {
-                case .networkError, .serverError, .rateLimitExceeded:
-                    retries += 1
-                    if retries < maxAttempts {
-                        logger.warning(
-                            "Request failed, retrying in \(currentDelay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
-                        )
-                        try await Task.sleep(nanoseconds: UInt64(currentDelay * 1_000_000_000))
-                        currentDelay *= 2
-                    } else {
-                        logger.error("Request failed after \(maxAttempts, privacy: .public) attempts.")
-                        throw error
+                retries += 1
+                let decision = EnhancementRetryPolicy.decision(
+                    for: retryFailure(for: error),
+                    failedAttempts: retries,
+                    maxAttempts: maxAttempts,
+                    retryOnTimeout: retryOnTimeout,
+                    fallbackAvailable: pendingFallback != nil,
+                    initialDelay: initialDelay
+                )
+                switch decision {
+                case .switchToFallback:
+                    guard let fallback = pendingFallback else { throw error }
+                    logger.notice(
+                        "Request failed (\(String(describing: error), privacy: .public)) on \(activeConfiguration.provider?.rawValue ?? "?", privacy: .public), switching to \(fallback.provider?.rawValue ?? "?", privacy: .public) \(fallback.modelName ?? "?", privacy: .public) (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
+                    )
+                    activeConfiguration = fallback
+                    pendingFallback = nil
+                case .retry(let delay):
+                    logger.warning(
+                        "Request failed (\(String(describing: error), privacy: .public)), retrying in \(delay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
+                    )
+                    if delay > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     }
-                case .timeout:
-                    if retryOnTimeout {
-                        retries += 1
-                        if retries < maxAttempts {
-                            logger.warning(
-                                "Request timed out, retrying immediately... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
-                            )
-                        } else {
-                            logger.error("Request timed out after \(maxAttempts, privacy: .public) attempts.")
-                            throw error
-                        }
-                    } else {
-                        logger.error("Request timed out, failing immediately (retry disabled).")
-                        throw error
-                    }
-                default:
+                case .fail:
+                    logger.error(
+                        "Request failed (\(String(describing: error), privacy: .public)) after \(retries, privacy: .public) attempt(s), not retrying."
+                    )
                     throw error
                 }
             } catch {
@@ -408,6 +451,7 @@ class AIEnhancementService: ObservableObject {
             let duration = endTime.timeIntervalSince(startTime)
             return AIEnhancementResult(
                 text: requestResult.text,
+                modelName: requestResult.modelName,
                 duration: duration,
                 promptName: promptName,
                 systemMessage: requestResult.systemMessage,

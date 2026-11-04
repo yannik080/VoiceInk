@@ -222,8 +222,7 @@ class AudioTranscriptionManager: ObservableObject {
                         enhancedText: enhancementResult.text,
                         audioFileURL: permanentURL.absoluteString,
                         transcriptionModelName: currentModel.displayName,
-                        aiEnhancementModelName: enhancementConfiguration.modelName
-                            ?? enhancementConfiguration.provider?.defaultModel,
+                        aiEnhancementModelName: enhancementResult.modelName,
                         promptName: enhancementResult.promptName
                             ?? enhancementConfiguration.prompt?.title,
                         transcriptionDuration: transcriptionDuration,
@@ -234,11 +233,12 @@ class AudioTranscriptionManager: ObservableObject {
                         modeEmoji: modeMetadata.emoji
                     )
                 } catch {
-                    let failureMessage = EnhancementFailureFormatter.message(for: error)
                     transcription = Transcription(
                         text: cleanedText,
                         duration: duration,
-                        enhancedText: failureMessage,
+                        // History and copy fall back to the transcript (YAN-431): a failure
+                        // message is not an enhanced version of the dictated text.
+                        enhancedText: nil,
                         audioFileURL: permanentURL.absoluteString,
                         transcriptionModelName: currentModel.displayName,
                         aiEnhancementModelName: enhancementConfiguration.modelName

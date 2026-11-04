@@ -198,6 +198,7 @@ class TranscriptionPipeline {
                             contextSnapshot: contextSnapshot
                         )
                         transcription.enhancedText = enhancementResult.text
+                        transcription.aiEnhancementModelName = enhancementResult.modelName
                         transcription.promptName =
                             enhancementResult.promptName ?? resolvedEnhancementConfiguration.prompt?.title
                         transcription.enhancementDuration = enhancementResult.duration
@@ -207,7 +208,9 @@ class TranscriptionPipeline {
                     } catch {
                         let errorDescription = EnhancementFailureFormatter.description(for: error)
                         let failureMessage = EnhancementFailureFormatter.message(description: errorDescription)
-                        transcription.enhancedText = failureMessage
+                        // History and "copy last enhancement" must also fall back to the transcript.
+                        // A failure notification is not an enhanced version of the dictated text.
+                        transcription.enhancedText = nil
                         responseError = errorDescription
                         await MainActor.run {
                             NotificationManager.shared.showNotification(
