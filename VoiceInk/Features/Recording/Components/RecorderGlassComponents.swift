@@ -325,10 +325,7 @@ struct RecorderLiveDotButton: View {
                 .strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2)
                 .frame(width: 9, height: 9)
         case .transcribing:
-            ProgressView()
-                .controlSize(.mini)
-                .environment(\.colorScheme, .dark)
-                .frame(width: 12, height: 12)
+            RecorderGlassSpinner()
         case .enhancing:
             Image(systemName: "sparkle")
                 .font(.system(size: 10, weight: .semibold))
@@ -363,6 +360,30 @@ struct RecorderLiveDotButton: View {
             return isAssistantThinking ? String(localized: "Thinking") : String(localized: "Enhancing recording")
         case .busy: return String(localized: "Recorder unavailable")
         }
+    }
+}
+
+/// White arc spinner in place of the dot while transcribing. The AppKit spinner draws grey and
+/// disappears on the tinted glass. Reduce Motion: no rotation, only brightness.
+struct RecorderGlassSpinner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            if reduceMotion {
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.45 + 0.4 * (0.5 - 0.5 * cos(2 * .pi * time / 1.05))), lineWidth: 1.5)
+                    .frame(width: 11, height: 11)
+            } else {
+                Circle()
+                    .trim(from: 0.12, to: 0.88)
+                    .stroke(Color.white.opacity(0.86), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .frame(width: 11, height: 11)
+                    .rotationEffect(.degrees((time.truncatingRemainder(dividingBy: 0.9) / 0.9) * 360))
+            }
+        }
+        .frame(width: 14, height: 14)
     }
 }
 
@@ -427,30 +448,36 @@ struct RecorderGlassLiveText: View {
 
     static let maxHeight: CGFloat = 68
 
+    @State private var textHeight: CGFloat = 0
+
+    private var isScrolling: Bool {
+        textHeight > Self.maxHeight
+    }
+
     var body: some View {
-        ViewThatFits(in: .vertical) {
-            label
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    label.id("bottom")
-                }
-                .frame(height: Self.maxHeight)
-                .mask(
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .black, location: 0.2),
-                            .init(color: .black, location: 1),
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-                .onChange(of: text) { proxy.scrollTo("bottom", anchor: .bottom) }
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                label
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { textHeight = $0 }
+                    .id("bottom")
             }
+            .scrollDisabled(!isScrolling)
+            .frame(height: min(max(textHeight, 1), Self.maxHeight))
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: isScrolling ? .clear : .black, location: 0),
+                        .init(color: .black, location: 0.2),
+                        .init(color: .black, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: text) { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: textHeight) { proxy.scrollTo("bottom", anchor: .bottom) }
         }
-        .frame(maxHeight: Self.maxHeight)
         .transaction { $0.disablesAnimations = true }
     }
 

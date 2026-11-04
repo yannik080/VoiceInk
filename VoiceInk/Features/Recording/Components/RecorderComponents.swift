@@ -393,6 +393,7 @@ struct AssistantPanelView: View {
     let onSend: (String) -> Void
 
     @State private var draftMessage = ""
+    @State private var glassContentHeight: CGFloat = 0
     @FocusState private var isFollowUpFieldFocused: Bool
 
     private let horizontalPadding: CGFloat = 20
@@ -421,7 +422,6 @@ struct AssistantPanelView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 4)
-                .frame(maxHeight: Self.glassMaxHeight)
             } else {
                 VStack(spacing: 8) {
                     messageList
@@ -440,9 +440,18 @@ struct AssistantPanelView: View {
 
     /// Grows with the answer; once it no longer fits, it scrolls and follows the newest message.
     private var glassMessageList: some View {
-        ViewThatFits(in: .vertical) {
-            messageStack
-            messageList
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                messageStack
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { glassContentHeight = $0 }
+            }
+            .frame(height: min(max(glassContentHeight, 1), Self.glassMaxHeight - 50))
+            .onChange(of: session.messages.count) {
+                scrollToBottom(proxy)
+            }
+            .onChange(of: session.phase) {
+                scrollToBottom(proxy)
+            }
         }
     }
 
