@@ -139,12 +139,29 @@ class FluidAudioModelManager: ObservableObject {
     nonisolated static func languageHint(from languageCode: String?, for modelName: String) -> Language? {
         guard !isParakeetUnifiedModel(named: modelName),
             !isNemotronModel(named: modelName),
-            asrVersion(for: modelName) == .v3,
-            let languageCode,
-            languageCode != "auto"
+            asrVersion(for: modelName) == .v3
         else { return nil }
 
+        guard let languageCode, languageCode != "auto" else {
+            return automaticLanguageHint(preferredLanguages: Locale.preferredLanguages)
+        }
         return Language(rawValue: languageCode)
+    }
+
+    /// Automatic detection can turn a single German or English word into
+    /// Cyrillic ("Supabase" became "Супербейс"). For v3 a hint only keeps the
+    /// decoder in the hint's script (French also blocks English-only tokens),
+    /// so automatic mode uses the first system language when no system
+    /// language Parakeet supports is written in another script.
+    nonisolated static func automaticLanguageHint(preferredLanguages: [String]) -> Language? {
+        let languages = preferredLanguages.compactMap { identifier -> Language? in
+            guard let code = Locale(identifier: identifier).language.languageCode?.identifier else {
+                return nil
+            }
+            return Language(rawValue: code)
+        }
+        guard languages.allSatisfy({ $0.script == .latin }) else { return nil }
+        return languages.first { $0 != .french }
     }
 
     init() {}
