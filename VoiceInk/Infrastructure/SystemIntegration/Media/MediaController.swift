@@ -26,7 +26,18 @@ final class MediaController: ObservableObject {
     }
 
     func muteSystemAudio(sessionID: UUID) -> Bool {
-        guard sessionID == recordingSessionID, !Task.isCancelled, isSystemMuteEnabled else { return false }
+        guard isSystemMuteEnabled else { return false }
+        return muteDefaultOutput(sessionID: sessionID)
+    }
+
+    /// Live media keeps playing muted instead of being paused. Restored by `unmuteSystemAudio`
+    /// like the regular mute, independent of the "Mute Audio While Recording" setting.
+    func muteOutputForLiveMedia(sessionID: UUID) -> Bool {
+        muteDefaultOutput(sessionID: sessionID)
+    }
+
+    private func muteDefaultOutput(sessionID: UUID) -> Bool {
+        guard sessionID == recordingSessionID, !Task.isCancelled else { return false }
         guard let deviceID = getDefaultOutputDevice(),
             let currentlyMuted = isSystemAudioMuted(deviceID: deviceID) else {
             return false

@@ -36,6 +36,12 @@ struct AudioSetupView: View {
 
                 Toggle("Pause Media While Recording", isOn: $playbackController.isPauseMediaEnabled)
 
+                Toggle(isOn: $playbackController.isLiveMediaMuteEnabled) {
+                    Text("Mute Live Streams Instead of Pausing")
+                    Text("Live content such as streams or sports keeps running muted, so it stays live. Videos and music are still paused.")
+                }
+                .disabled(!playbackController.isPauseMediaEnabled)
+
                 LabeledContent("Resume Delay") {
                     resumeDelayMenu
                         .disabled(!canEditResumeDelay)

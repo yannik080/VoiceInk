@@ -49,6 +49,7 @@ final class SystemInfoService {
             RECORDING FEEDBACK:
             Sound Feedback: \(CustomSoundManager.shared.hasAnyRecordingSoundEnabled)
             Pause Media While Recording: \(UserDefaults.standard.bool(forKey: "isPauseMediaEnabled"))
+            Mute Live Streams Instead of Pausing: \(UserDefaults.standard.bool(forKey: "isLiveMediaMuteEnabled"))
             Mute Audio While Recording: \(UserDefaults.standard.bool(forKey: "isSystemMuteEnabled"))
             Audio Resumption Delay: \(UserDefaults.standard.double(forKey: "audioResumptionDelay"))s
 

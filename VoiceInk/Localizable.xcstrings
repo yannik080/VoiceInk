@@ -31198,6 +31198,50 @@
           }
         }
       }
+    },
+    "Mute Live Streams Instead of Pausing" : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Livestreams stummschalten statt pausieren"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couper le son des directs au lieu de les mettre en pause"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播改为静音而不暂停"
+          }
+        }
+      }
+    },
+    "Live content such as streams or sports keeps running muted, so it stays live. Videos and music are still paused." : {
+      "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Live-Inhalte wie Streams oder Fußball laufen stumm weiter und bleiben live. Videos und Musik werden weiterhin pausiert."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Les contenus en direct, comme les streams ou le sport, continuent sans le son et restent en direct. Les vidéos et la musique sont toujours mises en pause."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直播、体育赛事等直播内容会静音继续播放，保持实时。视频和音乐仍会暂停。"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"
