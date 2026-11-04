@@ -38,6 +38,10 @@ Team V6XHQ49B57, 1704 Transkriptionen vor und nach dem Wechsel). Sicherung davor
 (App unter `Original/VoiceInk.app`, Preferences, Datenbanken, `data-verification.json`).
 Zurück: VoiceInk beenden, `Original/VoiceInk.app` nach `/Applications/VoiceInk.app` kopieren.
 
+Neu installiert am 04.11.2026 aus `ef6a9fa` (Pillen-Geometrie wie im Original; Binary identisch,
+Signatur gültig, Team V6XHQ49B57, 1711 Transkriptionen vor und nach dem Wechsel). Sicherung des
+vorherigen Wiederaufbau-Builds samt Daten: `~/Library/Application Support/VoiceInk Local Backups/2026-11-04-vor-pillen-fix/`.
+
 Logiktests: `for f in scripts/check-*.sh; do bash "$f"; done` (der Output-Check nimmt
 optional `VOICEINK_INCIDENT_JSON` für den Vorfall #950).
 
