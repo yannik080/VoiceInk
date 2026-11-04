@@ -32,6 +32,12 @@ nach GitHub gepusht.** Referenz-App des verlorenen Stands:
 
 Droppy Island wurde bewusst nicht wiederaufgebaut.
 
+Installiert am 04.11.2026 aus `7732e4a` (Binary identisch mit dem Build, Signatur gültig,
+Team V6XHQ49B57, 1704 Transkriptionen vor und nach dem Wechsel). Sicherung davor:
+`~/Library/Application Support/VoiceInk Local Backups/2026-11-04-before-wiederaufbau/`
+(App unter `Original/VoiceInk.app`, Preferences, Datenbanken, `data-verification.json`).
+Zurück: VoiceInk beenden, `Original/VoiceInk.app` nach `/Applications/VoiceInk.app` kopieren.
+
 Logiktests: `for f in scripts/check-*.sh; do bash "$f"; done` (der Output-Check nimmt
 optional `VOICEINK_INCIDENT_JSON` für den Vorfall #950).
 
