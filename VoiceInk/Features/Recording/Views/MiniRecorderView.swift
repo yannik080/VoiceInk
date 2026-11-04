@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// The mini recorder as a capsule of dark tinted Liquid Glass: the live dot on the leading end,
+/// the voice wave as the one hero. Live text and the assistant fold out upwards in the same glass.
+/// Tokens: `docs/design/charta.md`, brief `docs/design/briefs/2026-11-04-glas-recorder-wiederaufbau.md`.
 struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
     @ObservedObject var stateProvider: S
     @ObservedObject var recorder: Recorder
@@ -8,15 +11,8 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
     let onCloseTapped: () -> Void
     let onAssistantFollowUp: (String) -> Void
     @AppStorage(RecorderDisplaySettingsKeys.showLiveTranscript) private var showLiveTranscript = true
-
-    // MARK: - Layout Constants
-
-    private let controlBarHeight: CGFloat = 40
-    private let compactWidth: CGFloat = 184
-    private let expandedWidth: CGFloat = 300
-    private let assistantWidth: CGFloat = 520
-    private let compactCornerRadius: CGFloat = 20
-    private let expandedCornerRadius: CGFloat = 14
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasAppeared = false
 
     // true when live transcript is streaming in during recording
     private var hasLiveTranscript: Bool {
@@ -29,6 +25,14 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
         assistantSession.isVisible
     }
 
+    private var isExpanded: Bool {
+        hasLiveTranscript || hasAssistantResponse
+    }
+
+    private var isAssistantThinking: Bool {
+        hasAssistantResponse && assistantSession.isBusy
+    }
+
     private var shouldShowCloseButton: Bool {
         hasAssistantResponse && stateProvider.recordingState == .idle && !assistantSession.isBusy
     }
@@ -38,45 +42,85 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
         return stateProvider.partialTranscript
     }
 
+    private var width: CGFloat {
+        if hasAssistantResponse { return RecorderGlassMetrics.assistantWidth }
+        if hasLiveTranscript { return RecorderGlassMetrics.liveTextWidth }
+        return RecorderGlassMetrics.compactWidth
+    }
+
+    private var waveActivity: VoiceWaveformActivity {
+        if stateProvider.recordingState == .idle, isAssistantThinking {
+            return .enhancing
+        }
+        return VoiceWaveformActivity(stateProvider.recordingState)
+    }
+
+    private var conversationText: String {
+        assistantSession.messages.map { message in
+            let prefix = message.role == .user ? "You" : "Assistant"
+            return "\(prefix): \(message.content)"
+        }.joined(separator: "\n\n")
+    }
+
+    /// Fold out in 150 ms, fold in faster (60 ms). Reduce Motion: no size animation.
+    private var layoutAnimation: Animation? {
+        guard !reduceMotion else { return nil }
+        return isExpanded ? .easeOut(duration: 0.15) : .easeIn(duration: 0.06)
+    }
+
+    /// Text arrives 60 ms after the glass starts to grow and fades in over 80 ms.
+    private var textTransition: AnyTransition {
+        .asymmetric(
+            insertion: .opacity.animation(.easeOut(duration: 0.08).delay(0.06)),
+            removal: .opacity.animation(.easeIn(duration: 0.06))
+        )
+    }
+
     private var controlBar: some View {
         HStack(spacing: 0) {
             Group {
                 if shouldShowCloseButton {
-                    RecorderCloseButton(action: onCloseTapped)
+                    RecorderRoundButton(
+                        systemName: "xmark",
+                        label: String(localized: "Close"),
+                        action: onCloseTapped
+                    )
                 } else {
-                    RecorderRecordButton(
+                    RecorderLiveDotButton(
                         recordingState: stateProvider.recordingState,
+                        isAssistantThinking: isAssistantThinking,
                         action: onRecordButtonTapped
                     )
                 }
             }
-            .padding(.leading, 10)
+            .padding(.leading, 3)
 
             Spacer(minLength: 0)
 
-            RecorderStatusDisplay(
-                currentState: stateProvider.recordingState,
+            VoiceWaveform(
+                activity: waveActivity,
                 audioMeterProvider: recorder.audioMeterSnapshot
             )
 
             Spacer(minLength: 0)
 
-            RecorderModeButton(
-                buttonSize: 22,
-                padding: EdgeInsets()
-            )
-            .padding(.trailing, 12)
-        }
-        .frame(height: controlBarHeight)
-    }
-
-    private var transcriptSection: some View {
-        VStack(spacing: 0) {
-            if hasLiveTranscript {
-                LiveTranscriptView(text: stateProvider.partialTranscript)
-                Divider().background(Color.white.opacity(0.15))
+            // Mirrors the close button, so the wave stays centred while an answer is shown.
+            if hasAssistantResponse {
+                Group {
+                    if assistantSession.messages.isEmpty {
+                        Color.clear
+                            .frame(width: RecorderGlassMetrics.hitArea, height: RecorderGlassMetrics.hitArea)
+                    } else {
+                        RecorderCopyButton(
+                            text: conversationText,
+                            label: String(localized: "Copy conversation")
+                        )
+                    }
+                }
+                .padding(.trailing, 3)
             }
         }
+        .frame(height: RecorderGlassMetrics.barHeight)
     }
 
     var body: some View {
@@ -85,23 +129,25 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
                 AssistantPanelView(
                     session: assistantSession,
                     liveFollowUpText: liveAssistantFollowUpText,
+                    style: .glass,
                     onSend: onAssistantFollowUp
                 )
-                Divider().background(Color.white.opacity(0.15))
-            } else {
-                transcriptSection
+                .transition(textTransition)
+            } else if hasLiveTranscript {
+                RecorderGlassLiveText(text: stateProvider.partialTranscript)
+                    .transition(textTransition)
             }
             controlBar
         }
-        .frame(width: hasAssistantResponse ? assistantWidth : (hasLiveTranscript ? expandedWidth : compactWidth))
-        .background(Color.black)
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: hasLiveTranscript || hasAssistantResponse ? expandedCornerRadius : compactCornerRadius,
-                style: .continuous)
-        )
-        .animation(.easeInOut(duration: 0.3), value: hasLiveTranscript)
-        .animation(.easeInOut(duration: 0.3), value: hasAssistantResponse)
+        .frame(width: width)
+        .recorderGlass(tint: hasAssistantResponse ? RecorderGlassTint.assistant : RecorderGlassTint.bar)
+        .animation(layoutAnimation, value: isExpanded)
+        .animation(layoutAnimation, value: width)
+        .opacity(hasAppeared ? 1 : 0)
+        .scaleEffect(hasAppeared || reduceMotion ? 1 : 0.96, anchor: .bottom)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.12)) { hasAppeared = true }
+        }
         .gesture(WindowDragGesture())
         .allowsWindowActivationEvents()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)

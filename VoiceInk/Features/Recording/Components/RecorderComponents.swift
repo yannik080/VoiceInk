@@ -380,8 +380,16 @@ struct RecorderStatusDisplay: View {
 // MARK: - Assistant Response Panel
 
 struct AssistantPanelView: View {
+    /// `.glass` is the mini recorder's look (design charter): no copy overlay (the bar carries
+    /// "Copy conversation"), round send button, placeholder, height that grows with the answer.
+    enum Style {
+        case standard
+        case glass
+    }
+
     @ObservedObject var session: AssistantSession
     let liveFollowUpText: String
+    var style: Style = .standard
     let onSend: (String) -> Void
 
     @State private var draftMessage = ""
@@ -401,18 +409,68 @@ struct AssistantPanelView: View {
         }
     }
 
+    static let glassMaxHeight: CGFloat = 320
+
     var body: some View {
-        VStack(spacing: 8) {
-            messageList
-            followUpRow
+        Group {
+            if style == .glass {
+                VStack(spacing: 8) {
+                    glassMessageList
+                    followUpRow
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+                .frame(maxHeight: Self.glassMaxHeight)
+            } else {
+                VStack(spacing: 8) {
+                    messageList
+                    followUpRow
+                }
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, 10)
+                .frame(height: 320)
+            }
         }
-        .padding(.horizontal, horizontalPadding)
-        .padding(.vertical, 10)
-        .frame(height: 320)
         .onAppear(perform: focusFollowUpFieldIfAvailable)
         .onChange(of: session.phase) {
             focusFollowUpFieldIfAvailable()
         }
+    }
+
+    /// Grows with the answer; once it no longer fits, it scrolls and follows the newest message.
+    private var glassMessageList: some View {
+        ViewThatFits(in: .vertical) {
+            messageStack
+            messageList
+        }
+    }
+
+    private var messageStack: some View {
+        VStack(spacing: 8) {
+            ForEach(session.messages) { message in
+                AssistantMessageBubble(message: message, style: style)
+                    .id(message.id)
+                    .transition(.opacity)
+            }
+
+            if let statusText {
+                statusLabel(statusText)
+            }
+        }
+        .padding(.vertical, 2)
+        .fixedSize(horizontal: false, vertical: true)
+        .animation(.easeOut(duration: 0.15), value: session.messages.count)
+    }
+
+    private func statusLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundColor(.white.opacity(0.62))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .id("status")
     }
 
     private var fullConversationText: String {
@@ -427,23 +485,19 @@ struct AssistantPanelView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 8) {
                     ForEach(session.messages) { message in
-                        AssistantMessageBubble(message: message)
+                        AssistantMessageBubble(message: message, style: style)
                             .id(message.id)
+                            .transition(.opacity)
                     }
 
                     if let statusText {
-                        Text(statusText)
-                            .font(.system(size: 11))
-                            .foregroundColor(.white.opacity(0.62))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id("status")
+                        statusLabel(statusText)
                     }
                 }
                 .padding(.vertical, 2)
+                .animation(style == .glass ? .easeOut(duration: 0.15) : nil, value: session.messages.count)
                 .overlay(alignment: .topLeading) {
-                    if !session.messages.isEmpty {
+                    if style == .standard, !session.messages.isEmpty {
                         CopyIconButton(textToCopy: fullConversationText)
                             .scaleEffect(0.72)
                     }
@@ -459,6 +513,64 @@ struct AssistantPanelView: View {
     }
 
     private var followUpRow: some View {
+        Group {
+            if style == .glass {
+                glassFollowUpRow
+            } else {
+                standardFollowUpRow
+            }
+        }
+    }
+
+    private var followUpField: some View {
+        ZStack(alignment: .leading) {
+            if shouldShowLiveFollowUpText {
+                Text(liveFollowUpText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(followUpTextColor)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .allowsHitTesting(false)
+            } else if style == .glass, draftMessage.isEmpty {
+                Text("Ask a follow-up")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                    .lineLimit(1)
+                    .allowsHitTesting(false)
+            }
+
+            TextField("", text: $draftMessage)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(followUpTextColor)
+                .tint(followUpTextColor)
+                .disabled(!session.canSendFollowUp)
+                .focused($isFollowUpFieldFocused)
+                .onSubmit(sendDraftMessage)
+                .accessibilityLabel(Text("Follow-up message"))
+        }
+    }
+
+    private var glassFollowUpRow: some View {
+        HStack(spacing: 4) {
+            followUpField
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(Capsule(style: .circular).fill(Color.white.opacity(0.10)))
+                .opacity(session.canSendFollowUp ? 1 : 0.5)
+
+            RecorderRoundButton(
+                systemName: "paperplane.fill",
+                label: String(localized: "Send follow up"),
+                isActive: canSendDraft,
+                isEnabled: canSendDraft,
+                action: sendDraftMessage
+            )
+        }
+    }
+
+    private var standardFollowUpRow: some View {
         HStack(spacing: 8) {
             ZStack(alignment: .leading) {
                 if shouldShowLiveFollowUpText {
@@ -537,12 +649,47 @@ struct AssistantPanelView: View {
 
 private struct AssistantMessageBubble: View {
     let message: AssistantDisplayMessage
+    var style: AssistantPanelView.Style = .standard
 
     private var isUser: Bool {
         message.role == .user
     }
 
     var body: some View {
+        if style == .glass {
+            glassBody
+        } else {
+            standardBody
+        }
+    }
+
+    /// Glass: card radius, copy as a round button beside the answer instead of over its text.
+    private var glassBody: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            if isUser {
+                Spacer(minLength: 36)
+            }
+
+            MarkdownContentView(
+                message.content,
+                fontSize: 12,
+                foregroundColor: .white.opacity(isUser ? 0.92 : 0.86),
+                alignment: .leading
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isUser ? Color.white.opacity(0.16) : Color.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: AppTheme.Radius.card, style: .continuous))
+            .help(isUser ? message.content : "")
+
+            if !isUser {
+                RecorderCopyButton(text: message.content, label: String(localized: "Copy"))
+                Spacer(minLength: 8)
+            }
+        }
+    }
+
+    private var standardBody: some View {
         HStack {
             if isUser {
                 Spacer(minLength: 36)
