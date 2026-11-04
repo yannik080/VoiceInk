@@ -40,6 +40,10 @@ Verlorene Commits (aus T3-Verlauf belegt): `846eccc`/`dad40b5` Glass-Recorder (Y
 
 ## Fortschritt
 
+* 7732e4a Fix review findings: pause live media when the output cannot be muted
+* eb84c36 docs: record the rebuild branch and what was restored
+* a46f653 Restore Auto Learn as of 1c233ad (YAN-323)
+* 15abb90 Restore the enhancement chain: single attempt, retry policy, Cerebras fallback, repetition fix
 * 11fe77a Glass recorder: live text and answer height follow their content, readable spinner
 * 3c4cb45 Rebuild the Liquid Glass mini recorder from the design charter
 * eb1f18c Restore Latin script hint for Parakeet v3 in automatic language mode
@@ -47,4 +51,10 @@ Verlorene Commits (aus T3-Verlauf belegt): `846eccc`/`dad40b5` Glass-Recorder (Y
 * b6a9d5e Restore Wispr Flow style hybrid shortcut and double-tap fix
 * 2e937e2 Restore recording sound pairs with Deep Solid Button as default
 
-Noch offen: KI-Verbesserungskette (12444d5/72a025c/58899e0/9e444ec) und Auto-Learn (YAN-323) laufen als Worker; danach Integrations-Build, Checks, unabhängige Prüfung, Abnahme durch Yannik, Installation mit Sicherung.
+Prüfung: Integrations-Build `make local` grün; alle neun `scripts/check-*.sh` grün (Auto-Learn 52,
+Retry 19, Single-Attempt, Output inkl. Vorfall #950, Live-Medien, Kurzbefehl, Klänge, Updater).
+Unabhängige Prüfung (Opus, high) ohne Blocker; der mittlere Befund (Ausgabe ohne Stummschaltung →
+Livestream lief weiter) ist behoben: dann wird wie bisher pausiert. Glas-Recorder über weißem
+Dokument, dunklem Editor und buntem Hintergrund gerendert und geprüft.
+
+Offen: Installation mit Sicherung und Abnahme durch Yannik; Live-stumm mit echtem Stream prüfen.
