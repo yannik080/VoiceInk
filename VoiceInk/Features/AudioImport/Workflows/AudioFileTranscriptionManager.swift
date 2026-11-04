@@ -233,6 +233,11 @@ class AudioTranscriptionManager: ObservableObject {
                         modeEmoji: modeMetadata.emoji
                     )
                 } catch {
+                    let failureMessage = EnhancementFailureFormatter.message(for: error)
+                    logger.warning("Enhancement failed for imported audio: \(error.localizedDescription, privacy: .public)")
+                    await MainActor.run {
+                        NotificationManager.shared.showNotification(title: failureMessage, type: .warning)
+                    }
                     transcription = Transcription(
                         text: cleanedText,
                         duration: duration,

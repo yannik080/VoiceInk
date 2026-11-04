@@ -446,7 +446,8 @@ struct RecorderCopyButton: View {
 struct RecorderGlassLiveText: View {
     let text: String
 
-    static let maxHeight: CGFloat = 68
+    /// Four lines of 12-pt text (about 57 pt) plus the 12 pt of insets fit without scrolling.
+    static let maxHeight: CGFloat = 72
 
     @State private var textHeight: CGFloat = 0
 

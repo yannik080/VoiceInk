@@ -160,6 +160,24 @@ class PlaybackController: ObservableObject {
             return
         }
 
+        // A growing live window needs two observations of the same item. When the listener's
+        // single update does not show live yet, take one fresh look before pausing.
+        if isLiveMediaMuteEnabled, stateSource == "listener", let trackInfo = lastKnownTrackInfo,
+            liveMediaDetector.liveReason(for: Self.liveObservation(trackInfo)) == nil
+        {
+            if let freshTrackInfo = await fetchCurrentTrackInfo() {
+                guard !Task.isCancelled, sessionID == recordingSessionID, isPauseMediaEnabled else {
+                    return
+                }
+                liveMediaDetector.observe(Self.liveObservation(freshTrackInfo))
+                if freshTrackInfo.payload.isPlaying == true,
+                    freshTrackInfo.payload.bundleIdentifier == bundleId
+                {
+                    lastKnownTrackInfo = freshTrackInfo
+                }
+            }
+        }
+
         try? await Task.sleep(nanoseconds: 50_000_000)
         guard !Task.isCancelled, sessionID == recordingSessionID, isPauseMediaEnabled else {
             return
@@ -173,8 +191,17 @@ class PlaybackController: ObservableObject {
         if isLiveMediaMuteEnabled, let trackInfo = lastKnownTrackInfo,
             let reason = liveMediaDetector.liveReason(for: Self.liveObservation(trackInfo))
         {
-            await muteLiveMedia(sessionID: sessionID, reason: reason, source: stateSource)
-            return
+            if await muteLiveMedia(sessionID: sessionID, reason: reason, source: stateSource) {
+                return
+            }
+            // The output cannot be muted (HDMI/DisplayPort, many USB DACs): pausing still keeps
+            // the stream out of the microphone, so fall back to the normal pause.
+            guard !Task.isCancelled, sessionID == recordingSessionID, isPauseMediaEnabled,
+                lastKnownTrackInfo?.payload.bundleIdentifier == bundleId,
+                lastKnownTrackInfo?.payload.isPlaying == true
+            else {
+                return
+            }
         }
 
         // Own only commands actually queued, not a cancelled 50 ms pre-pause delay.
@@ -188,15 +215,20 @@ class PlaybackController: ObservableObject {
 
     /// Pausing a live stream drops it out of live: mute the output instead. The recorder restores
     /// it with the system mute when recording stops, and cancels this task if it stops first.
-    private func muteLiveMedia(sessionID: UUID, reason: LiveMediaDetector.Reason, source: String) async {
+    /// Returns true when the output is muted; false when it was cancelled or could not be muted.
+    private func muteLiveMedia(sessionID: UUID, reason: LiveMediaDetector.Reason, source: String) async -> Bool {
         do {
             try await Task.sleep(nanoseconds: liveMuteDelayNanoseconds)
         } catch {
-            return
+            return false
         }
-        guard !Task.isCancelled, sessionID == recordingSessionID, isPauseMediaEnabled else { return }
+        guard !Task.isCancelled, sessionID == recordingSessionID, isPauseMediaEnabled else { return false }
         let muted = MediaController.shared.muteOutputForLiveMedia(sessionID: sessionID)
-        logPauseDecision(muted ? "mute-live" : "mute-live-failed", source: "\(source) live=\(reason.rawValue)")
+        logPauseDecision(
+            muted ? "mute-live" : "mute-live-failed-pausing",
+            source: "\(source) live=\(reason.rawValue)"
+        )
+        return muted
     }
 
     private static func liveObservation(_ trackInfo: TrackInfo) -> LiveMediaDetector.Observation {
